@@ -9,87 +9,118 @@ import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.Resource;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.util.Assert;
 
 import io.github.idoly.pgmq.PgmqException;
 
 /**
- * Initializes the PGMQ PostgreSQL extension and optionally executes
- * a SQL script defined in {@link PgmqProperties}.
+ * Initializes the database objects required by PGMQ.
  *
- * <p>Automatically runs if {@code autoInit} property is enabled.</p>
- *
- * <p>Depends on {@link org.springframework.jdbc.core.JdbcTemplate} and
- * {@link io.github.idoly.pgmq.config.PgmqProperties}.</p>
- *
- * @see PgmqProperties
+ * <p>If the PostgreSQL extension is available, it enables the extension when
+ * needed. Otherwise, it applies the configured SQL script when the bundled schema
+ * is not already installed.</p>
  */
 public class PgmqInitializer {
 
-    private static final Log logger = LogFactory.getLog(PgmqListenerContainer.class);
+    /** PGMQ version this starter is built against. */
+    private static final String PGMQ_VERSION = "1.11.2";
 
+    /** Logger used for version mismatch warnings. */
+    private static final Log logger = LogFactory.getLog(PgmqInitializer.class);
+
+    /** JDBC client used for extension and schema checks. */
     private final JdbcTemplate jdbcTemplate;
+
+    /** Initialization properties. */
     private final PgmqProperties properties;
 
     /**
-     * Constructs a PgmqInitializer.
+     * Create an initializer backed by JDBC and starter properties.
      *
-     * @param jdbcTemplate the JdbcTemplate used for executing SQL
-     * @param properties the PGMQ configuration properties
+     * @param jdbcTemplate JDBC client used for database checks and script execution
+     * @param properties initializer configuration
      */
     public PgmqInitializer(JdbcTemplate jdbcTemplate, PgmqProperties properties) {
+        Assert.notNull(jdbcTemplate, "JdbcTemplate must not be null");
+        Assert.notNull(properties, "PgmqProperties must not be null");
         this.jdbcTemplate = jdbcTemplate;
         this.properties = properties;
     }
 
     /**
-     * Initializes PGMQ by executing the SQL script if the extension is not available,
-     * and enabling the PGMQ extension if it is not yet installed.
+     * Initialize PGMQ if it is not already available to the application.
      */
     public void init() {
         try {
-            if (!isPgmqAvailable()) {
-                executeSql(properties.getSqlScript());
-            } else if (!isPgmqInstalled()) {
-                enableExtension();
+            if (isPgmqAvailable()) {
+                if (!isPgmqInstalled()) {
+                    enableExtension();
+                }
+                validateInstalledVersion();
+                return;
             }
+
+            if (!isPgmqSchemaInstalled()) {
+                executeSql(properties.getSqlScript());
+            }
+        } catch (PgmqException e) {
+            throw e;
         } catch (Exception e) {
-            logger.error(e);
+            throw new PgmqException("failed to initialize PGMQ", e);
         }
     }
 
     /**
-     * Enables the PGMQ PostgreSQL extension if it is not already installed.
-     *
-     * @throws DataAccessException if executing the SQL fails
+     * Enable the PostgreSQL extension.
      */
     private void enableExtension() throws DataAccessException {
-        jdbcTemplate.execute("create extension pgmq");
+        jdbcTemplate.update("create extension pgmq");
     }
 
     /**
-     * Checks if the PGMQ extension is available in the PostgreSQL instance.
-     *
-     * @return true if available, false otherwise
+     * Return whether the PGMQ extension can be installed by PostgreSQL.
      */
     private boolean isPgmqAvailable() {
-        return jdbcTemplate.queryForObject("select exists (select 1 from pg_available_extensions where name = 'pgmq')", Boolean.class);
+        Boolean available = jdbcTemplate.queryForObject(
+                "select exists (select 1 from pg_available_extensions where name = 'pgmq')", Boolean.class);
+        return Boolean.TRUE.equals(available);
     }
 
     /**
-     * Checks if the PGMQ extension is installed.
-     *
-     * @return true if installed, false otherwise
+     * Return whether the PGMQ extension is already installed.
      */
     private boolean isPgmqInstalled() {
-        return jdbcTemplate.queryForObject("select exists (select 1 from pg_extension where extname = 'pgmq')", Boolean.class);
+        Boolean installed = jdbcTemplate.queryForObject(
+                "select exists (select 1 from pg_extension where extname = 'pgmq')", Boolean.class);
+        return Boolean.TRUE.equals(installed);
     }
 
     /**
-     * Executes a SQL script from the classpath using the DataSource from JdbcTemplate.
-     *
-     * @param sqlScript path of the SQL script in the classpath
-     * @throws IOException if the script cannot be read
-     * @throws PgmqException if the script does not exist or execution fails
+     * Warn when the installed PGMQ extension version does not match this starter.
+     */
+    private void validateInstalledVersion() {
+        String installedVersion = jdbcTemplate.queryForObject(
+                "select extversion from pg_extension where extname = 'pgmq'", String.class);
+        if (!PGMQ_VERSION.equals(installedVersion)) {
+            logger.warn("PGMQ extension version mismatch: installed "
+                    + installedVersion + ", expected " + PGMQ_VERSION);
+        }
+    }
+
+    /**
+     * Return whether the bundled SQL schema appears to be installed.
+     */
+    private boolean isPgmqSchemaInstalled() {
+        String sql = """
+                select to_regclass('pgmq.meta') is not null
+                   and to_regprocedure('pgmq.send(text,jsonb)') is not null
+                """;
+        Boolean installed = jdbcTemplate.queryForObject(sql, Boolean.class);
+        return Boolean.TRUE.equals(installed);
+    }
+
+    /**
+     * Execute the configured classpath SQL script.
      */
     private void executeSql(String sqlScript) throws IOException {
         Resource resource = new ClassPathResource(sqlScript);
@@ -97,7 +128,8 @@ public class PgmqInitializer {
             throw new PgmqException("SQL script not found: " + sqlScript);
         }
 
-        String sql = new String(resource.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        String sql = resource.getContentAsString(StandardCharsets.UTF_8);
         jdbcTemplate.execute(sql);
     }
+
 }

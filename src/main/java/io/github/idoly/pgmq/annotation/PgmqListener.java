@@ -6,14 +6,17 @@ import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
+import io.github.idoly.pgmq.listener.AckMode;
+
 /**
- * Marks a method as a listener for a PGMQ queue.
+ * Declares a method-driven listener for a PGMQ queue.
  *
- * <p>Annotated methods are invoked automatically when messages are received
- * from the configured queue.</p>
+ * <p>The annotation processor registers a listener container for each annotated
+ * method and resolves method arguments from the message payload, headers, message
+ * record, or acknowledgement handle.</p>
  *
  * <pre>{@code
- * @PgmqListener(queue = "myQueue", vt = 60, qty = 5, concurrency = 2)
+ * @PgmqListener(value = "myQueue", visibilityTimeout = 60, batchSize = 5, concurrency = 2)
  * public void handle(MyMessage message) {
  *     // handle message
  * }
@@ -25,37 +28,117 @@ import java.lang.annotation.Target;
 public @interface PgmqListener {
 
     /**
+     * Unique listener id used by the listener registry.
+     *
+     * @return listener id
+     */
+    String id() default "";
+
+    /**
      * Name of the queue to listen to.
      *
      * @return queue name
      */
-    String queue();
+    String value();
+
+    /**
+     * Listener container factory bean name.
+     *
+     * @return container factory bean name
+     */
+    String containerFactory() default "";
 
     /**
      * Visibility timeout in seconds.
+     * Uses {@code pgmq.listener.visibility-timeout} when set to {@code -1}.
      *
      * @return visibility timeout
      */
-    int vt() default 30;
+    int visibilityTimeout() default -1;
 
     /**
      * Number of messages to read per batch.
+     * Uses {@code pgmq.listener.batch-size} when set to {@code -1}.
      *
      * @return batch size
      */
-    int qty() default 10;
+    int batchSize() default -1;
 
     /**
      * JSON filter for message content (experimental).
+     * Only applies to {@link Mode#READ}.
+     * Uses {@code pgmq.listener.conditional} when empty.
      *
-     * @return JSON filter string
+     * @return JSON conditional
      */
-    String conditional() default "{}";
+    String conditional() default "";
+
+    /**
+     * Read mode used by the listener container.
+     * Uses {@code pgmq.listener.mode} when set to {@link Mode#DEFAULT}.
+     *
+     * @return listener read mode
+     */
+    Mode mode() default Mode.DEFAULT;
+
+    /**
+     * Maximum seconds to wait for messages when polling.
+     * Uses {@code pgmq.listener.max-poll-seconds} when set to {@code -1}.
+     *
+     * @return maximum poll seconds
+     */
+    int maxPollSeconds() default -1;
+
+    /**
+     * Milliseconds between poll attempts.
+     * Uses {@code pgmq.listener.poll-interval-ms} when set to {@code -1}.
+     *
+     * @return poll interval in milliseconds
+     */
+    int pollIntervalMs() default -1;
 
     /**
      * Number of concurrent threads for processing.
+     * Uses {@code pgmq.listener.concurrency} when set to {@code -1}.
      *
      * @return concurrency level
      */
-    int concurrency() default 1;
+    int concurrency() default -1;
+
+    /**
+     * Whether this listener should start automatically.
+     * Uses {@code pgmq.listener.auto-startup} when empty.
+     *
+     * @return auto-startup flag string
+     */
+    String autoStartup() default "";
+
+    /**
+     * Message acknowledgement mode.
+     * Uses {@code pgmq.listener.ack-mode} when set to {@link AckMode#DEFAULT}.
+     *
+     * @return acknowledgement mode
+     */
+    AckMode ackMode() default AckMode.DEFAULT;
+
+    /**
+     * Listener read mode.
+     */
+    enum Mode {
+
+        /** Use the listener mode configured in properties. */
+        DEFAULT,
+
+        /** Standard read_with_poll behavior. */
+        READ,
+
+        /** FIFO grouped read behavior. */
+        FIFO_GROUPED,
+
+        /** FIFO grouped round-robin read behavior. */
+        FIFO_ROUND_ROBIN,
+
+        /** FIFO grouped head read behavior. */
+        FIFO_HEAD
+    }
 }
