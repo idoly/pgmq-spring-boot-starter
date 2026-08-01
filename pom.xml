@@ -227,9 +227,6 @@
                                 </goals>
                             </execution>
                         </executions>
-                        <configuration>
-                            <gpgExecutable>gpg</gpgExecutable>
-                        </configuration>
                     </plugin>
                     <plugin>
                         <groupId>org.sonatype.central</groupId>
