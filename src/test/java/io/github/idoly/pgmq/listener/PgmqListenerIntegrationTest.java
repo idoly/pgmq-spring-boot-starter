@@ -40,7 +40,7 @@ import io.github.idoly.pgmq.testsupport.PostgresPartmanContainerSupport;
                 "pgmq.listener.max-poll-seconds=1",
                 "pgmq.listener.poll-interval-ms=50"
         })
-@Testcontainers
+@Testcontainers(disabledWithoutDocker = true)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class PgmqListenerIntegrationTest extends PostgresPartmanContainerSupport {
 

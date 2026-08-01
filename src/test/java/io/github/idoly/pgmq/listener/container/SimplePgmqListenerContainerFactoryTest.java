@@ -16,6 +16,7 @@ import io.github.idoly.pgmq.PgmqException;
 import io.github.idoly.pgmq.annotation.PgmqListener;
 import io.github.idoly.pgmq.config.PgmqProperties;
 import io.github.idoly.pgmq.listener.endpoint.MethodPgmqListenerEndpoint;
+import io.github.idoly.pgmq.metrics.PgmqListenerMetrics;
 import io.github.idoly.pgmq.template.PgmqTemplate;
 
 class SimplePgmqListenerContainerFactoryTest {
@@ -29,6 +30,9 @@ class SimplePgmqListenerContainerFactoryTest {
 
         assertEquals("handle", container.getId());
         assertFalse(container.isAutoStartup());
+        assertEquals(2, container.getOptions().pollConcurrency());
+        assertEquals(4, container.getOptions().maxInFlight());
+        assertEquals(5, container.getOptions().executorShutdownTimeoutSeconds());
     }
 
     @Test
@@ -51,7 +55,9 @@ class SimplePgmqListenerContainerFactoryTest {
         return new SimplePgmqListenerContainerFactory(
                 new PgmqTemplate(new JdbcTemplate(), new ObjectMapper()),
                 new PgmqProperties(),
-                (error, message, acknowledgment) -> {}
+                (error, message, acknowledgment) -> {},
+                new DefaultPgmqListenerExecutorFactory(),
+                new PgmqListenerMetrics()
         );
     }
 
@@ -63,7 +69,13 @@ class SimplePgmqListenerContainerFactoryTest {
 
     private static class Handler {
 
-        @PgmqListener(value = "queue", autoStartup = "false")
+        @PgmqListener(
+                value = "queue",
+                autoStartup = "false",
+                consumerConcurrency = 2,
+                pollConcurrency = 2,
+                maxInFlight = 4,
+                executorShutdownTimeoutSeconds = 5)
         void handle(String payload) {
         }
 

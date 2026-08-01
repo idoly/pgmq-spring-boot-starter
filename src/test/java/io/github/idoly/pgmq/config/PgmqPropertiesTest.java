@@ -26,7 +26,10 @@ class PgmqPropertiesTest {
         assertEquals(10, listener.getBatchSize());
         assertEquals(PgmqTemplate.DEFAULT_CONDITIONAL, listener.getConditional());
         assertEquals(PgmqListener.Mode.READ, listener.getMode());
-        assertEquals(1, listener.getConcurrency());
+        assertEquals(1, listener.getConsumerConcurrency());
+        assertEquals(1, listener.getPollConcurrency());
+        assertEquals(10, listener.getMaxInFlight());
+        assertEquals(30, listener.getExecutorShutdownTimeoutSeconds());
         assertTrue(listener.isAutoStartup());
         assertEquals(AckMode.AUTO, listener.getAckMode());
         assertEquals(PgmqTemplate.DEFAULT_MAX_POLL_SECONDS, listener.getMaxPollSeconds());
@@ -51,7 +54,10 @@ class PgmqPropertiesTest {
         assertThrows(IllegalArgumentException.class, () -> properties.setSqlScript(""));
         assertThrows(IllegalArgumentException.class, () -> listener.setVisibilityTimeout(0));
         assertThrows(IllegalArgumentException.class, () -> listener.setBatchSize(0));
-        assertThrows(IllegalArgumentException.class, () -> listener.setConcurrency(0));
+        assertThrows(IllegalArgumentException.class, () -> listener.setConsumerConcurrency(0));
+        assertThrows(IllegalArgumentException.class, () -> listener.setPollConcurrency(0));
+        assertThrows(IllegalArgumentException.class, () -> listener.setMaxInFlight(0));
+        assertThrows(IllegalArgumentException.class, () -> listener.setExecutorShutdownTimeoutSeconds(-1));
         assertThrows(IllegalArgumentException.class, () -> listener.setMaxPollSeconds(-1));
         assertThrows(IllegalArgumentException.class, () -> listener.setPollIntervalMs(0));
     }

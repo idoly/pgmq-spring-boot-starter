@@ -403,11 +403,11 @@ public class PgmqTemplate {
      *
      * @param queue the target queue name
      * @param msg message payload
-     * @param delay timestamp when the message becomes visible
+     * @param visibleAt timestamp when the message becomes visible
      * @return inserted message ID
      */
-    public long send(@NonNull String queue, @NonNull Object msg, @NonNull OffsetDateTime delay) {
-        return send(queue, msg, Map.of(), delay);
+    public long send(@NonNull String queue, @NonNull Object msg, @NonNull OffsetDateTime visibleAt) {
+        return send(queue, msg, Map.of(), visibleAt);
     }
 
     /**
@@ -421,7 +421,7 @@ public class PgmqTemplate {
      */
     public long send(@NonNull String queue, @NonNull Object msg, @NonNull Map<String, Object> headers, int delay) {
         validateDelay(delay);
-        return send(queue, msg, headers, OffsetDateTime.now().plusSeconds(delay));
+        return sendInternal(queue, msg, headers, delay);
     }
 
     /**
@@ -433,18 +433,24 @@ public class PgmqTemplate {
      * @param queue the target queue name
      * @param msg message payload
      * @param headers custom headers
-     * @param delay timestamp when the message becomes visible
+     * @param visibleAt timestamp when the message becomes visible
      * @return inserted message ID
      */
-    public long send(@NonNull String queue, @NonNull Object msg, @NonNull Map<String, Object> headers, @NonNull OffsetDateTime delay) {
+    public long send(@NonNull String queue, @NonNull Object msg, @NonNull Map<String, Object> headers,
+            @NonNull OffsetDateTime visibleAt) {
+        Assert.notNull(visibleAt, "Visibility timestamp must not be null");
+        return sendInternal(queue, msg, headers, visibleAt);
+    }
+
+    private long sendInternal(String queue, Object msg, Map<String, Object> headers, Object visibilityValue) {
         validateQueueNameArgument(queue);
         validateMessage(msg);
         validateHeaders(headers);
-        Assert.notNull(delay, "Delay timestamp must not be null");
         Map<String, Object> messageHeaders = messageHeaders(msg, headers);
 
         String sql = "select * from pgmq.send(?, ?::jsonb, ?::jsonb, ?)";
-        return jdbcTemplate.queryForObject(sql, Long.class, queue, toJson(msg), toJson(messageHeaders), delay);
+        return jdbcTemplate.queryForObject(
+                sql, Long.class, queue, toJson(msg), toJson(messageHeaders), visibilityValue);
     }
 
     /**
@@ -512,11 +518,12 @@ public class PgmqTemplate {
      *
      * @param queue the target queue name
      * @param msgs message payloads
-     * @param delay timestamp when messages become visible
+     * @param visibleAt timestamp when messages become visible
      * @return inserted message IDs
      */
-    public List<Long> sendBatch(@NonNull String queue, @NonNull List<Object> msgs, @NonNull OffsetDateTime delay) {
-        return sendBatch(queue, msgs, List.of(), delay);
+    public List<Long> sendBatch(@NonNull String queue, @NonNull List<Object> msgs,
+            @NonNull OffsetDateTime visibleAt) {
+        return sendBatch(queue, msgs, List.of(), visibleAt);
     }
 
     /**
@@ -531,7 +538,7 @@ public class PgmqTemplate {
      */
     public List<Long> sendBatch(@NonNull String queue, @NonNull List<Object> msgs, @NonNull List<Map<String, Object>> headers, int delay) {
         validateDelay(delay);
-        return sendBatch(queue, msgs, headers, OffsetDateTime.now().plusSeconds(delay));
+        return sendBatchInternal(queue, msgs, headers, delay);
     }
 
     /**
@@ -544,19 +551,26 @@ public class PgmqTemplate {
      * @param queue the target queue name
      * @param msgs message payloads
      * @param headers shared or per-message headers
-     * @param delay timestamp when messages become visible
+     * @param visibleAt timestamp when messages become visible
      * @return inserted message IDs
      * @throws PgmqException if {@code headers} contains more than one element and its size does not match {@code msgs}
      */
-    public List<Long> sendBatch(@NonNull String queue, @NonNull List<Object> msgs, List<Map<String, Object>> headers, @NonNull OffsetDateTime delay) {
+    public List<Long> sendBatch(@NonNull String queue, @NonNull List<Object> msgs,
+            List<Map<String, Object>> headers, @NonNull OffsetDateTime visibleAt) {
+        Assert.notNull(visibleAt, "Visibility timestamp must not be null");
+        return sendBatchInternal(queue, msgs, headers, visibleAt);
+    }
+
+    private List<Long> sendBatchInternal(String queue, List<Object> msgs,
+            List<Map<String, Object>> headers, Object visibilityValue) {
         validateQueueNameArgument(queue);
         validateMessages(msgs);
         validateHeaderList(headers);
-        Assert.notNull(delay, "Delay timestamp must not be null");
         List<Map<String, Object>> messageHeaders = messageHeaders(msgs, headers);
 
         String sql = "select * from pgmq.send_batch(?, ?::jsonb[], ?::jsonb[], ?)";
-        return jdbcTemplate.queryForList(sql, Long.class, queue, toJsonArray(msgs), toJsonArray(messageHeaders), delay);
+        return jdbcTemplate.queryForList(
+                sql, Long.class, queue, toJsonArray(msgs), toJsonArray(messageHeaders), visibilityValue);
     }
 
     /**
@@ -601,17 +615,6 @@ public class PgmqTemplate {
         validateQueueNameArgument(queue);
         String sql = "select pgmq.purge_queue(?)";
         return jdbcTemplate.queryForObject(sql, Long.class, queue);
-    }
-
-    /**
-     * Detach a queue archive table so it can be retained when the queue is dropped.
-     *
-     * @param queue the queue name
-     */
-    public void detachArchive(@NonNull String queue) {
-        validateQueueNameArgument(queue);
-        String sql = "select pgmq.detach_archive(?)";
-        jdbcTemplate.queryForObject(sql, Object.class, queue);
     }
 
     /**
@@ -798,7 +801,13 @@ public class PgmqTemplate {
      * @param queue the queue name
      */
     public void createPartitioned(@NonNull String queue) {
-        createPartitioned(queue, "10000", "100000");
+        validateQueueNameArgument(queue);
+        if (!Boolean.TRUE.equals(isPartmanInstalled())) {
+            throw new PgmqException("pg_partman extension is required for partitioned queues");
+        }
+
+        String sql = "select pgmq.create_partitioned(?)";
+        jdbcTemplate.queryForObject(sql, Object.class, queue);
     }
 
     /**
@@ -842,7 +851,13 @@ public class PgmqTemplate {
      * @param tableName the archive table name to convert
      */
     public void convertArchivePartitioned(@NonNull String tableName) {
-        convertArchivePartitioned(tableName, "10000", "100000", 10);
+        validateQueueNameArgument(tableName);
+        if (!Boolean.TRUE.equals(isPartmanInstalled())) {
+            throw new PgmqException("pg_partman extension is required for partitioned archives");
+        }
+
+        String sql = "select pgmq.convert_archive_partitioned(?)";
+        jdbcTemplate.queryForObject(sql, Object.class, tableName);
     }
 
     /**
@@ -868,13 +883,13 @@ public class PgmqTemplate {
      * Enable insert notifications for a queue.
      *
      * @param queue the queue name
-     * @param throttleInterval minimum milliseconds between notifications
+     * @param throttleIntervalMs minimum milliseconds between notifications
      */
-    public void enableNotifyInsert(@NonNull String queue, int throttleInterval) {
+    public void enableNotifyInsert(@NonNull String queue, int throttleIntervalMs) {
         validateQueueNameArgument(queue);
-        Assert.isTrue(throttleInterval >= 0, "Throttle interval must be greater than or equal to 0");
+        Assert.isTrue(throttleIntervalMs >= 0, "Throttle interval must be greater than or equal to 0");
         String sql = "select pgmq.enable_notify_insert(?, ?)";
-        jdbcTemplate.queryForObject(sql, Object.class, queue, throttleInterval);
+        jdbcTemplate.queryForObject(sql, Object.class, queue, throttleIntervalMs);
     }
 
     /**
@@ -883,7 +898,9 @@ public class PgmqTemplate {
      * @param queue the queue name
      */
     public void enableNotifyInsert(@NonNull String queue) {
-        enableNotifyInsert(queue, 250);
+        validateQueueNameArgument(queue);
+        String sql = "select pgmq.enable_notify_insert(?)";
+        jdbcTemplate.queryForObject(sql, Object.class, queue);
     }
 
     /**
@@ -911,13 +928,13 @@ public class PgmqTemplate {
      * Update notification throttle settings for a queue.
      *
      * @param queue the queue name
-     * @param throttleInterval minimum milliseconds between notifications
+     * @param throttleIntervalMs minimum milliseconds between notifications
      */
-    public void updateNotifyInsert(@NonNull String queue, int throttleInterval) {
+    public void updateNotifyInsert(@NonNull String queue, int throttleIntervalMs) {
         validateQueueNameArgument(queue);
-        Assert.isTrue(throttleInterval >= 0, "Throttle interval must be greater than or equal to 0");
+        Assert.isTrue(throttleIntervalMs >= 0, "Throttle interval must be greater than or equal to 0");
         String sql = "select pgmq.update_notify_insert(?, ?)";
-        jdbcTemplate.queryForObject(sql, Object.class, queue, throttleInterval);
+        jdbcTemplate.queryForObject(sql, Object.class, queue, throttleIntervalMs);
     }
 
     /**
@@ -1129,11 +1146,12 @@ public class PgmqTemplate {
      *
      * @param routingKey the routing key
      * @param msgs message payloads
-     * @param delay timestamp when messages become visible
+     * @param visibleAt timestamp when messages become visible
      * @return inserted message IDs with queue names
      */
-    public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<Object> msgs, @NonNull OffsetDateTime delay) {
-        return sendBatchTopic(routingKey, msgs, List.of(), delay);
+    public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<Object> msgs,
+            @NonNull OffsetDateTime visibleAt) {
+        return sendBatchTopic(routingKey, msgs, List.of(), visibleAt);
     }
 
     /**
@@ -1148,7 +1166,7 @@ public class PgmqTemplate {
      */
     public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<Object> msgs, @NonNull List<Map<String, Object>> headers, int delay) {
         validateDelay(delay);
-        return sendBatchTopic(routingKey, msgs, headers, OffsetDateTime.now().plusSeconds(delay));
+        return sendBatchTopicInternal(routingKey, msgs, headers, delay);
     }
 
     /**
@@ -1161,19 +1179,26 @@ public class PgmqTemplate {
      * @param routingKey the routing key
      * @param msgs message payloads
      * @param headers shared or per-message headers
-     * @param delay timestamp when messages become visible
+     * @param visibleAt timestamp when messages become visible
      * @return inserted message IDs with queue names
      * @throws PgmqException if {@code headers} contains more than one element and its size does not match {@code msgs}
      */
-    public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<Object> msgs, List<Map<String, Object>> headers, @NonNull OffsetDateTime delay) {
+    public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<Object> msgs,
+            List<Map<String, Object>> headers, @NonNull OffsetDateTime visibleAt) {
+        Assert.notNull(visibleAt, "Visibility timestamp must not be null");
+        return sendBatchTopicInternal(routingKey, msgs, headers, visibleAt);
+    }
+
+    private List<TopicBatchResult> sendBatchTopicInternal(String routingKey, List<Object> msgs,
+            List<Map<String, Object>> headers, Object visibilityValue) {
         validateRoutingKeyArgument(routingKey);
         validateMessages(msgs);
         validateHeaderList(headers);
-        Assert.notNull(delay, "Delay timestamp must not be null");
         List<Map<String, Object>> messageHeaders = messageHeaders(msgs, headers);
 
         String sql = "select * from pgmq.send_batch_topic(?, ?::jsonb[], ?::jsonb[], ?)";
-        return jdbcTemplate.query(sql, new TopicBatchResultRowMapper(), routingKey, toJsonArray(msgs), toJsonArray(messageHeaders), delay);
+        return jdbcTemplate.query(sql, new TopicBatchResultRowMapper(),
+                routingKey, toJsonArray(msgs), toJsonArray(messageHeaders), visibilityValue);
     }
 
     /**

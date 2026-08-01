@@ -2,7 +2,7 @@
 
 Spring Boot starter for [PostgreSQL PGMQ](https://github.com/pgmq/pgmq). It auto-configures a JDBC-backed
 `PgmqTemplate`, annotation-driven listeners, queue declarations, topic routing, FIFO helpers,
-insert notification helpers, and Micrometer gauges.
+insert notification helpers, and Micrometer metrics.
 
 This release uses the current package layout and is not source-compatible with the legacy
 `io.github.idoly.pgmq.core` API. See [MIGRATION.md](MIGRATION.md) for upgrade steps and
@@ -14,7 +14,7 @@ This release uses the current package layout and is not source-compatible with t
 <dependency>
     <groupId>io.github.idoly</groupId>
     <artifactId>pgmq-spring-boot-starter</artifactId>
-    <version>2.0-1.11.2</version>
+    <version>2.1-1.11.2</version>
 </dependency>
 ```
 
@@ -33,14 +33,6 @@ The default build uses Spring Boot `3.5.x` so the starter does not accidentally 
 Spring Boot 4-only APIs. Profiles pin the first patch release in each supported line; override
 `spring-boot.version` to a newer patch in the same line when validating locally.
 
-Build checks:
-
-```shell
-mvn -q test
-mvn -q -Pboot40 -DskipTests test
-mvn -q -Pboot41 -DskipTests test
-```
-
 ## Auto-Configuration
 
 When a `JdbcTemplate` is available, the starter contributes these beans unless the application
@@ -51,10 +43,12 @@ already defines equivalents:
 | `PgmqTemplate` | Main Java API for PGMQ SQL functions |
 | `PgmqInitializer` | Optional extension or bundled SQL initialization |
 | `PgmqQueueDeclarer` | Creates queues represented by `PgmqQueue` beans |
-| `PgmqMetricsBinder` | Micrometer `MeterBinder` and lifecycle sampler |
+| `PgmqMetricsBinder` | Micrometer queue and notification sampler |
+| `PgmqListenerMetrics` | Listener state, polling, and processing metrics |
 | `pgmqListenerContainerFactory` | Default `@PgmqListener` container factory |
 | `PgmqListenerEndpointRegistry` | Owns annotation-created listener containers |
 | `PgmqErrorHandler` | Handles listener processing failures |
+| `PgmqListenerExecutorFactory` | Creates container-owned poller and consumer executors |
 
 Listener infrastructure is conditional on `pgmq.listener.enabled=true`, which is the default.
 
@@ -66,10 +60,13 @@ Listener infrastructure is conditional on `pgmq.listener.enabled=true`, which is
 | `pgmq.sql-script` | `string` | `sql/pgmq.sql` | Classpath SQL script used when the PGMQ extension is unavailable and the bundled schema is not installed. |
 | `pgmq.listener.enabled` | `boolean` | `true` | Enable annotation-driven listeners. |
 | `pgmq.listener.visibility-timeout` | `int` | `30` | Default listener visibility timeout in seconds. |
-| `pgmq.listener.batch-size` | `int` | `10` | Default number of messages read per listener poll. |
+| `pgmq.listener.batch-size` | `int` | `10` | Maximum messages requested by one poller; available in-flight permits may lower the actual quantity. |
 | `pgmq.listener.conditional` | `string` | `{}` | Default JSON conditional used by standard `READ` mode. |
 | `pgmq.listener.mode` | `enum` | `READ` | Default read mode: `READ`, `FIFO_GROUPED`, `FIFO_ROUND_ROBIN`, or `FIFO_HEAD`. |
-| `pgmq.listener.concurrency` | `int` | `1` | Default number of worker threads per listener method. |
+| `pgmq.listener.consumer-concurrency` | `int` | `1` | Default number of concurrent consumer threads per listener. |
+| `pgmq.listener.poll-concurrency` | `int` | `1` | Default number of blocking database pollers per listener. |
+| `pgmq.listener.max-in-flight` | `int` | `10` | Maximum messages queued or executing per listener. |
+| `pgmq.listener.executor-shutdown-timeout-seconds` | `int` | `30` | Maximum seconds to drain each executor during shutdown. |
 | `pgmq.listener.auto-startup` | `boolean` | `true` | Whether listener containers start with the Spring lifecycle. |
 | `pgmq.listener.ack-mode` | `enum` | `AUTO` | Default acknowledgement mode: `AUTO`, `MANUAL`, or `NONE`. |
 | `pgmq.listener.max-poll-seconds` | `int` | `5` | Maximum seconds a listener long-poll waits for messages. |
@@ -77,8 +74,9 @@ Listener infrastructure is conditional on `pgmq.listener.enabled=true`, which is
 
 Numeric listener properties are validated during binding or listener container creation.
 Visibility timeout may be `0` in template calls, but listener visibility timeout, batch size,
-concurrency, and poll interval defaults must be positive. `max-poll-seconds` may be `0` for an
-immediate long-poll timeout.
+consumer concurrency, poll concurrency, max in-flight, and poll interval defaults must be positive.
+`max-in-flight` must be greater than or equal to both concurrency values. `max-poll-seconds` and
+`executor-shutdown-timeout-seconds` may be `0`.
 
 ## Initialization
 
@@ -147,7 +145,8 @@ pgmqTemplate.archive("orders", msgId);
 
 `send(...)`, `sendBatch(...)`, `sendTopic(...)`, and `sendBatchTopic(...)` copy caller headers
 and add an internal `_type` header. The template uses that header to deserialize messages back to
-their Java payload type when possible.
+their Java payload type when possible. Relative delays are passed to PGMQ as integer seconds and
+use the PostgreSQL clock; absolute `visibleAt` timestamps are passed as `TIMESTAMP WITH TIME ZONE`.
 
 Batch send methods accept no headers, one shared header map, or one header map per message.
 Empty message batches, `null` payloads, `null` headers, empty header names, and mismatched
@@ -238,6 +237,31 @@ Acknowledgement modes:
 The default listener container factory bean is named `pgmqListenerContainerFactory`.
 Override `PgmqErrorHandler` to customize listener failure handling.
 
+### Listener Execution
+
+Listener containers separate blocking database polling from listener method execution. Pollers
+reserve bounded in-flight capacity before reading, so a slow consumer cannot create an unbounded
+local backlog. Successful `AUTO` messages are archived individually as soon as processing finishes.
+
+```java
+@PgmqListener(
+        value = "orders",
+        pollConcurrency = 1,
+        consumerConcurrency = 8,
+        maxInFlight = 16,
+        executorShutdownTimeoutSeconds = 30)
+public void concurrentOrderListener(OrderEvent event) {
+    process(event);
+}
+```
+
+Keep total `pollConcurrency` below the JDBC pool capacity after reserving connections for normal
+application queries and acknowledgement operations. The timeout is applied separately while
+stopping the poller executor and while draining the consumer executor, so the total stop duration
+can be up to twice the configured value. Applications may provide a `PgmqListenerExecutorFactory`
+bean to create custom platform-thread or Java 21 virtual-thread consumer executors. Returned
+executors must be dedicated to one container because the container owns their shutdown lifecycle.
+
 ## FIFO Reads
 
 FIFO helpers group messages by the `x-pgmq-group` header. Messages without that header use the
@@ -312,8 +336,9 @@ The no-argument throttle overload uses PGMQ's default `250` millisecond throttle
 
 ## Micrometer Metrics
 
-The auto-configuration registers `PgmqMetricsBinder`, which exposes these gauges and refreshes
-them every 30 seconds by default:
+The auto-configuration registers `PgmqMetricsBinder` for database queue/notification gauges and
+`PgmqListenerMetrics` for listener execution metrics. Database gauges refresh every 30 seconds by
+default; listener counters, timers, and state gauges update from the listener hot path.
 
 ```text
 pgmq.queue.length
@@ -323,29 +348,46 @@ pgmq.queue.oldest_msg_age_sec
 pgmq.queue.total_messages
 pgmq.notify_insert.throttle_interval_ms
 pgmq.notify_insert.last_notified_at_epoch_seconds
+pgmq.listener.running
+pgmq.listener.in_flight
+pgmq.listener.polls
+pgmq.listener.poll.duration
+pgmq.listener.messages
+pgmq.listener.processing.duration
 ```
 
 Queue metrics are tagged with `queue`. Notification metrics are also tagged with `queue`.
-`newest_msg_age_sec`, `oldest_msg_age_sec`, and `last_notified_at_epoch_seconds` preserve database
-`NULL` values; Micrometer exports missing numeric values as `NaN`.
+Listener metrics are tagged with `listener` and `queue`; poll and processing counters/timers also use
+`result=success|error`. `newest_msg_age_sec`, `oldest_msg_age_sec`, and
+`last_notified_at_epoch_seconds` preserve database `NULL` values; Micrometer exports missing numeric
+values as `NaN`.
 
-## Local Test Environment
+## Development and Release
 
-Tests use Testcontainers to start PostgreSQL automatically with
-`ghcr.io/dbsystel/postgresql-partman:latest`. Make sure Docker or Podman-compatible container
-support is available, then run:
+Run the default Spring Boot 3.5 tests and compile against each supported Spring Boot 4 line:
 
 ```shell
 mvn -q test
+mvn -q -Pboot40 -DskipTests package
+mvn -q -Pboot41 -DskipTests package
 ```
 
-For rootless Podman, expose the Podman socket to Testcontainers before running the tests:
+### Podman Test Environment
+
+Tests use Testcontainers to start PostgreSQL automatically with the pinned
+`ghcr.io/dbsystel/postgresql-partman@sha256:c12e31bdd5e16ea72b88f30bbf96b539368f747a8c7896880a22b3cf0741a6f0`
+image. Integration tests are skipped when a Podman API socket is not available. To run the complete
+suite, install Podman and expose its rootless socket:
 
 ```shell
-export DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock
+systemctl --user enable --now podman.socket
+export DOCKER_HOST=unix://${XDG_RUNTIME_DIR}/podman/podman.sock
 export TESTCONTAINERS_RYUK_DISABLED=true
 mvn -q test
 ```
+
+Testcontainers retains the `DOCKER_HOST` environment variable name because Podman exposes a
+Docker-compatible API.
 
 ### Manual PostgreSQL Environment
 
@@ -357,7 +399,7 @@ podman run -d --name postgresql-partman \
   -e POSTGRES_USER=postgres \
   -e POSTGRES_PASSWORD=postgres \
   -p 5432:5432 \
-  ghcr.io/dbsystel/postgresql-partman
+  ghcr.io/dbsystel/postgresql-partman@sha256:c12e31bdd5e16ea72b88f30bbf96b539368f747a8c7896880a22b3cf0741a6f0
 
 podman exec -it postgresql-partman bash
 psql -U postgres
@@ -366,3 +408,12 @@ create extension if not exists pg_partman;
 
 This manual container is supplemental. The Maven tests create and manage their own isolated
 PostgreSQL container through Testcontainers.
+
+### Publishing
+
+Signing and Maven Central publishing are enabled only by the explicit `release` profile. Publishing
+requires a `central` server entry in Maven settings and a GPG secret key:
+
+```shell
+mvn -Prelease deploy
+```

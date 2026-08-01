@@ -16,6 +16,7 @@ import java.util.Map;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -38,6 +39,7 @@ class PgmqTemplateSerializationTest {
 
         assertEquals(1L, msgId);
         assertFalse(headers.containsKey(PgmqTemplate.TYPE_HEADER));
+        assertEquals(OffsetDateTime.parse("2026-07-04T00:00:00Z"), jdbcTemplate.args[3]);
 
         Map<?, ?> sentHeaders = objectMapper.readValue((String) jdbcTemplate.args[2], Map.class);
         assertEquals("test", sentHeaders.get("source"));
@@ -91,14 +93,43 @@ class PgmqTemplateSerializationTest {
     }
 
     @Test
-    void detachArchiveCallsCurrentSqlFunction() {
+    void relativeDelayMethodsUsePostgresIntegerOverloads() {
         CapturingJdbcTemplate jdbcTemplate = new CapturingJdbcTemplate();
         PgmqTemplate pgmqTemplate = new PgmqTemplate(jdbcTemplate, objectMapper);
 
-        pgmqTemplate.detachArchive("queue");
+        pgmqTemplate.send("queue", "one", Map.of(), 3);
+        assertEquals(3, jdbcTemplate.args[3]);
 
-        assertEquals("select pgmq.detach_archive(?)", jdbcTemplate.sql);
-        assertSame(Object.class, jdbcTemplate.requiredType);
+        pgmqTemplate.sendBatch("queue", List.of("one", "two"), List.of(), 4);
+        assertEquals(4, jdbcTemplate.args[3]);
+
+        pgmqTemplate.sendBatchTopic("events.created", List.of("one"), List.of(), 5);
+        assertEquals(5, jdbcTemplate.args[3]);
+    }
+
+    @Test
+    void defaultNotifyThrottleUsesPostgresDefault() {
+        CapturingJdbcTemplate jdbcTemplate = new CapturingJdbcTemplate();
+        PgmqTemplate pgmqTemplate = new PgmqTemplate(jdbcTemplate, objectMapper);
+
+        pgmqTemplate.enableNotifyInsert("queue");
+
+        assertEquals("select pgmq.enable_notify_insert(?)", jdbcTemplate.sql);
+        assertArrayEquals(new Object[] {"queue"}, jdbcTemplate.args);
+    }
+
+    @Test
+    void defaultPartitionMethodsUsePostgresDefaults() {
+        CapturingJdbcTemplate jdbcTemplate = new CapturingJdbcTemplate();
+        PgmqTemplate pgmqTemplate = new PgmqTemplate(jdbcTemplate, objectMapper);
+
+        pgmqTemplate.createPartitioned("queue");
+        assertEquals("select pgmq.create_partitioned(?)", jdbcTemplate.sql);
+        assertArrayEquals(new Object[] {"queue"}, jdbcTemplate.args);
+
+        pgmqTemplate.convertArchivePartitioned("queue");
+        assertEquals("select pgmq.convert_archive_partitioned(?)", jdbcTemplate.sql);
+        assertArrayEquals(new Object[] {"queue"}, jdbcTemplate.args);
     }
 
     @Test
@@ -243,6 +274,14 @@ class PgmqTemplateSerializationTest {
         @Override
         public <T> T queryForObject(String sql, Class<T> requiredType) {
             return queryForObject(sql, requiredType, new Object[0]);
+        }
+
+        @Override
+        public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+            this.sql = sql;
+            this.requiredType = null;
+            this.args = args;
+            return List.of();
         }
 
         @Override

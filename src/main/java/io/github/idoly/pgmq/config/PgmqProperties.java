@@ -85,7 +85,8 @@ public class PgmqProperties {
         private int visibilityTimeout = 30;
 
         /**
-         * Default number of messages to read per batch.
+         * Maximum number of messages requested by one poller. Available
+         * in-flight permits may reduce the actual quantity.
          * Default is {@code 10}.
          */
         private int batchSize = 10;
@@ -103,10 +104,30 @@ public class PgmqProperties {
         private PgmqListener.Mode mode = PgmqListener.Mode.READ;
 
         /**
-         * Default number of concurrent listener threads.
+         * Default number of concurrent consumer threads.
          * Default is {@code 1}.
          */
-        private int concurrency = 1;
+        private int consumerConcurrency = 1;
+
+        /**
+         * Default number of concurrent blocking database pollers.
+         * Each active poller may occupy one JDBC connection.
+         * Default is {@code 1}.
+         */
+        private int pollConcurrency = 1;
+
+        /**
+         * Default maximum number of messages queued or being processed.
+         * Must be at least the consumer and poll concurrency values.
+         * Default is {@code 10}.
+         */
+        private int maxInFlight = 10;
+
+        /**
+         * Maximum seconds to wait for each poller or consumer executor shutdown phase.
+         * Default is {@code 30}.
+         */
+        private int executorShutdownTimeoutSeconds = 30;
 
         /**
          * Whether listeners start automatically.
@@ -174,13 +195,41 @@ public class PgmqProperties {
             this.mode = mode;
         }
 
-        public int getConcurrency() {
-            return concurrency;
+        public int getConsumerConcurrency() {
+            return consumerConcurrency;
         }
 
-        public void setConcurrency(int concurrency) {
-            Assert.isTrue(concurrency > 0, "Concurrency must be greater than 0");
-            this.concurrency = concurrency;
+        public void setConsumerConcurrency(int consumerConcurrency) {
+            Assert.isTrue(consumerConcurrency > 0, "Consumer concurrency must be greater than 0");
+            this.consumerConcurrency = consumerConcurrency;
+        }
+
+        public int getPollConcurrency() {
+            return pollConcurrency;
+        }
+
+        public void setPollConcurrency(int pollConcurrency) {
+            Assert.isTrue(pollConcurrency > 0, "Poll concurrency must be greater than 0");
+            this.pollConcurrency = pollConcurrency;
+        }
+
+        public int getMaxInFlight() {
+            return maxInFlight;
+        }
+
+        public void setMaxInFlight(int maxInFlight) {
+            Assert.isTrue(maxInFlight > 0, "Max in-flight must be greater than 0");
+            this.maxInFlight = maxInFlight;
+        }
+
+        public int getExecutorShutdownTimeoutSeconds() {
+            return executorShutdownTimeoutSeconds;
+        }
+
+        public void setExecutorShutdownTimeoutSeconds(int executorShutdownTimeoutSeconds) {
+            Assert.isTrue(executorShutdownTimeoutSeconds >= 0,
+                    "Executor shutdown timeout must be greater than or equal to 0");
+            this.executorShutdownTimeoutSeconds = executorShutdownTimeoutSeconds;
         }
 
         public boolean isAutoStartup() {

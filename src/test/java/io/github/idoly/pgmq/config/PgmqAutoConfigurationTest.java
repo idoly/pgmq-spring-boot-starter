@@ -9,9 +9,11 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
 import io.github.idoly.pgmq.listener.PgmqErrorHandler;
+import io.github.idoly.pgmq.listener.container.PgmqListenerExecutorFactory;
 import io.github.idoly.pgmq.listener.container.SimplePgmqListenerContainerFactory;
 import io.github.idoly.pgmq.listener.endpoint.PgmqListenerAnnotationBeanPostProcessor;
 import io.github.idoly.pgmq.listener.endpoint.PgmqListenerEndpointRegistry;
+import io.github.idoly.pgmq.metrics.PgmqListenerMetrics;
 import io.github.idoly.pgmq.metrics.PgmqMetricsBinder;
 import io.github.idoly.pgmq.template.PgmqTemplate;
 
@@ -34,9 +36,11 @@ class PgmqAutoConfigurationTest {
                     assertThat(context).hasSingleBean(PgmqInitializer.class);
                     assertThat(context).hasSingleBean(PgmqTemplate.class);
                     assertThat(context).hasSingleBean(PgmqMetricsBinder.class);
+                    assertThat(context).hasSingleBean(PgmqListenerMetrics.class);
                     assertThat(context).hasSingleBean(PgmqQueueDeclarer.class);
                     assertThat(context).hasSingleBean(PgmqListenerEndpointRegistry.class);
                     assertThat(context).hasSingleBean(PgmqErrorHandler.class);
+                    assertThat(context).hasSingleBean(PgmqListenerExecutorFactory.class);
                     assertThat(context).hasSingleBean(PgmqListenerAnnotationBeanPostProcessor.class);
                     assertThat(context).hasSingleBean(SimplePgmqListenerContainerFactory.class);
                     assertThat(context).hasBean("pgmqListenerContainerFactory");
@@ -52,6 +56,8 @@ class PgmqAutoConfigurationTest {
                     assertThat(context).hasSingleBean(PgmqTemplate.class);
                     assertThat(context).doesNotHaveBean(PgmqListenerEndpointRegistry.class);
                     assertThat(context).doesNotHaveBean(PgmqErrorHandler.class);
+                    assertThat(context).doesNotHaveBean(PgmqListenerExecutorFactory.class);
+                    assertThat(context).doesNotHaveBean(PgmqListenerMetrics.class);
                     assertThat(context).doesNotHaveBean(PgmqListenerAnnotationBeanPostProcessor.class);
                     assertThat(context).doesNotHaveBean(SimplePgmqListenerContainerFactory.class);
                     assertThat(context).doesNotHaveBean("pgmqListenerContainerFactory");

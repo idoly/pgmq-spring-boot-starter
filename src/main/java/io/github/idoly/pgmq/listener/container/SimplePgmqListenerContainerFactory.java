@@ -11,6 +11,7 @@ import io.github.idoly.pgmq.listener.PgmqErrorHandler;
 import io.github.idoly.pgmq.listener.PgmqMessageListener;
 import io.github.idoly.pgmq.listener.adapter.MethodPgmqMessageListenerAdapter;
 import io.github.idoly.pgmq.listener.endpoint.MethodPgmqListenerEndpoint;
+import io.github.idoly.pgmq.metrics.PgmqListenerMetrics;
 import io.github.idoly.pgmq.template.PgmqTemplate;
 
 /**
@@ -31,21 +32,34 @@ public class SimplePgmqListenerContainerFactory
     /** Error handler shared by containers created by this factory. */
     private final PgmqErrorHandler errorHandler;
 
+    /** Factory for the executors owned by each listener container. */
+    private final PgmqListenerExecutorFactory executorFactory;
+
+    /** Metrics shared by containers created by this factory. */
+    private final PgmqListenerMetrics listenerMetrics;
+
     /**
-     * Create a factory backed by shared listener infrastructure.
+     * Create a factory with custom executor and metric infrastructure.
      *
      * @param pgmqTemplate template used by containers and adapters
      * @param properties starter properties used as defaults
      * @param errorHandler error handler shared by created containers
+     * @param executorFactory factory for container-owned executors
+     * @param listenerMetrics listener metric recorder
      */
     public SimplePgmqListenerContainerFactory(PgmqTemplate pgmqTemplate, PgmqProperties properties,
-            PgmqErrorHandler errorHandler) {
+            PgmqErrorHandler errorHandler, PgmqListenerExecutorFactory executorFactory,
+            PgmqListenerMetrics listenerMetrics) {
         Assert.notNull(pgmqTemplate, "PgmqTemplate must not be null");
         Assert.notNull(properties, "PgmqProperties must not be null");
         Assert.notNull(errorHandler, "PgmqErrorHandler must not be null");
+        Assert.notNull(executorFactory, "PgmqListenerExecutorFactory must not be null");
+        Assert.notNull(listenerMetrics, "PgmqListenerMetrics must not be null");
         this.pgmqTemplate = pgmqTemplate;
         this.properties = properties;
         this.errorHandler = errorHandler;
+        this.executorFactory = executorFactory;
+        this.listenerMetrics = listenerMetrics;
     }
 
     /**
@@ -55,7 +69,16 @@ public class SimplePgmqListenerContainerFactory
     public PgmqListenerContainer createListenerContainer(MethodPgmqListenerEndpoint endpoint) {
         PgmqMessageListener messageListener = new MethodPgmqMessageListenerAdapter(
                 pgmqTemplate, endpoint.getBean(), endpoint.getMethod());
-        return new PgmqListenerContainer(pgmqTemplate, messageListener, errorHandler, resolveOptions(endpoint));
+        PgmqListenerContainerOptions listenerOptions = resolveOptions(endpoint);
+        PgmqListenerContainer container = new PgmqListenerContainer(
+                pgmqTemplate,
+                messageListener,
+                errorHandler,
+                listenerOptions,
+                executorFactory,
+                listenerMetrics);
+        listenerMetrics.registerContainer(container);
+        return container;
     }
 
     /**
@@ -63,20 +86,29 @@ public class SimplePgmqListenerContainerFactory
      */
     private PgmqListenerContainerOptions resolveOptions(MethodPgmqListenerEndpoint endpoint) {
         PgmqListener annotation = endpoint.getAnnotation();
-        PgmqProperties.Listener listener = properties.getListener();
+        PgmqProperties.Listener listenerProperties = properties.getListener();
 
         return new PgmqListenerContainerOptions(
                 endpoint.getId(),
                 endpoint.getQueue(),
-                resolvePositive(annotation.visibilityTimeout(), listener.getVisibilityTimeout(), "visibilityTimeout"),
-                resolvePositive(annotation.batchSize(), listener.getBatchSize(), "batchSize"),
-                resolveConditional(annotation.conditional(), listener.getConditional()),
-                resolveMode(annotation.mode(), listener.getMode()),
-                resolveNonNegative(annotation.maxPollSeconds(), listener.getMaxPollSeconds(), "maxPollSeconds"),
-                resolvePositive(annotation.pollIntervalMs(), listener.getPollIntervalMs(), "pollIntervalMs"),
-                resolvePositive(annotation.concurrency(), listener.getConcurrency(), "concurrency"),
-                resolveAutoStartup(annotation.autoStartup(), listener.isAutoStartup()),
-                resolveAckMode(annotation.ackMode(), listener.getAckMode())
+                resolvePositive(annotation.visibilityTimeout(), listenerProperties.getVisibilityTimeout(),
+                        "visibilityTimeout"),
+                resolvePositive(annotation.batchSize(), listenerProperties.getBatchSize(), "batchSize"),
+                resolveConditional(annotation.conditional(), listenerProperties.getConditional()),
+                resolveMode(annotation.mode(), listenerProperties.getMode()),
+                resolveNonNegative(annotation.maxPollSeconds(), listenerProperties.getMaxPollSeconds(),
+                        "maxPollSeconds"),
+                resolvePositive(annotation.pollIntervalMs(), listenerProperties.getPollIntervalMs(),
+                        "pollIntervalMs"),
+                resolvePositive(annotation.consumerConcurrency(), listenerProperties.getConsumerConcurrency(),
+                        "consumerConcurrency"),
+                resolvePositive(annotation.pollConcurrency(), listenerProperties.getPollConcurrency(),
+                        "pollConcurrency"),
+                resolvePositive(annotation.maxInFlight(), listenerProperties.getMaxInFlight(), "maxInFlight"),
+                resolveNonNegative(annotation.executorShutdownTimeoutSeconds(),
+                        listenerProperties.getExecutorShutdownTimeoutSeconds(), "executorShutdownTimeoutSeconds"),
+                resolveAutoStartup(annotation.autoStartup(), listenerProperties.isAutoStartup()),
+                resolveAckMode(annotation.ackMode(), listenerProperties.getAckMode())
         );
     }
 

@@ -13,10 +13,13 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.github.idoly.pgmq.listener.PgmqErrorHandler;
+import io.github.idoly.pgmq.listener.container.DefaultPgmqListenerExecutorFactory;
+import io.github.idoly.pgmq.listener.container.PgmqListenerExecutorFactory;
 import io.github.idoly.pgmq.listener.container.SimplePgmqListenerContainerFactory;
 import io.github.idoly.pgmq.listener.endpoint.PgmqListenerAnnotationBeanPostProcessor;
 import io.github.idoly.pgmq.listener.endpoint.PgmqListenerEndpointRegistry;
 import io.github.idoly.pgmq.listener.support.LoggingPgmqErrorHandler;
+import io.github.idoly.pgmq.metrics.PgmqListenerMetrics;
 import io.github.idoly.pgmq.metrics.PgmqMetricsBinder;
 import io.github.idoly.pgmq.queue.PgmqQueue;
 import io.github.idoly.pgmq.template.PgmqTemplate;
@@ -95,14 +98,36 @@ public class PgmqAutoConfiguration {
     }
 
     /**
+     * Creates listener execution metrics.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "pgmq.listener", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public PgmqListenerMetrics pgmqListenerMetrics() {
+        return new PgmqListenerMetrics();
+    }
+
+    /**
+     * Creates the default factory for listener-owned poller and consumer executors.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "pgmq.listener", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public PgmqListenerExecutorFactory pgmqListenerExecutorFactory() {
+        return new DefaultPgmqListenerExecutorFactory();
+    }
+
+    /**
      * Creates the default listener container factory.
      */
     @Bean(name = "pgmqListenerContainerFactory")
     @ConditionalOnMissingBean(name = "pgmqListenerContainerFactory")
     @ConditionalOnProperty(prefix = "pgmq.listener", name = "enabled", havingValue = "true", matchIfMissing = true)
     public SimplePgmqListenerContainerFactory pgmqListenerContainerFactory(PgmqTemplate pgmqTemplate,
-            PgmqProperties properties, PgmqErrorHandler errorHandler) {
-        return new SimplePgmqListenerContainerFactory(pgmqTemplate, properties, errorHandler);
+            PgmqProperties properties, PgmqErrorHandler errorHandler,
+            PgmqListenerExecutorFactory executorFactory, PgmqListenerMetrics listenerMetrics) {
+        return new SimplePgmqListenerContainerFactory(
+                pgmqTemplate, properties, errorHandler, executorFactory, listenerMetrics);
     }
 
     /**

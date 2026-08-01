@@ -1,5 +1,40 @@
 # Changelog
 
+## 2.1-1.11.2
+
+### Added
+
+- Added separate consumer and database poller executors with bounded in-flight backpressure.
+- Added `consumer-concurrency`, `poll-concurrency`, `max-in-flight`, and
+  `executor-shutdown-timeout-seconds` listener settings.
+- Added a replaceable `PgmqListenerExecutorFactory` for custom platform or virtual thread executors.
+- Added Micrometer listener running, in-flight, poll, processing, success, and error metrics.
+
+### Changed
+
+- Consolidated all resolved listener settings in `PgmqListenerContainerOptions`; no compatibility
+  aliases are retained.
+- Changed `AUTO` acknowledgement to archive each message immediately after successful processing.
+- Changed relative-delay template methods to use PGMQ integer-delay overloads and the database clock.
+- Delegated notification, partition, and archive-partition default values to their SQL functions.
+
+### Removed
+
+- Removed `PgmqListenerExecutionOptions`; its fields now belong to `PgmqListenerContainerOptions`.
+- Removed `pgmq.listener.concurrency` and `@PgmqListener.concurrency`; use
+  `consumer-concurrency` and `consumerConcurrency`.
+- Removed the Java `detachArchive` API because PGMQ 1.11.2 implements its SQL function as a
+  deprecated no-op.
+
+### Build
+
+- Added GitHub Actions checks for Spring Boot 3.5, 4.0, and 4.1.
+- Configured Testcontainers integration tests to use a Podman API socket and skip cleanly when no
+  compatible socket is available.
+- Pinned the PostgreSQL/pg_partman test image by digest.
+- Isolated GPG signing and Maven Central publishing in the explicit `release` profile.
+- Added the Apache License 2.0 text to the repository.
+
 ## 2.0-1.11.2
 
 This release is a breaking API cleanup around the PGMQ `1.11.2` SQL surface. It does not preserve
@@ -66,7 +101,6 @@ source compatibility with the legacy `io.github.idoly.pgmq.core` package.
   - `convertArchivePartitioned`
   - `dropQueue`
   - `purgeQueue`
-  - `detachArchive`
   - `listQueues`
 - Topic routing APIs in `PgmqTemplate`:
   - `validateRoutingKey`

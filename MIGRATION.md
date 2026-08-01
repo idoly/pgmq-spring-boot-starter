@@ -1,7 +1,28 @@
 # Migration Guide
 
-This guide covers migration from the legacy `core` API to `2.0-1.11.2`. The current release
+This guide covers migration from the legacy `core` API to `2.1-1.11.2`. The current release
 intentionally removes backward compatibility.
+
+## Upgrade from 2.0-1.11.2
+
+Version `2.1-1.11.2` replaces the listener execution model and does not retain 2.0 aliases.
+
+| 2.0 API or property | 2.1 replacement |
+| ------------------- | --------------- |
+| `pgmq.listener.concurrency` | `pgmq.listener.consumer-concurrency` |
+| `@PgmqListener(concurrency = ...)` | `@PgmqListener(consumerConcurrency = ...)` |
+| `PgmqListenerExecutionOptions` | Fields merged into `PgmqListenerContainerOptions` |
+| Two-argument executor factory methods | `createPollExecutor(options)` and `createConsumerExecutor(options)` |
+| `PgmqTemplate.detachArchive(...)` | Removed because the PGMQ 1.11.2 SQL function is a no-op |
+
+`PgmqListenerContainerOptions` now contains consumer concurrency, poll concurrency, maximum
+in-flight messages, and executor shutdown timeout. Custom container factories must construct the
+complete options record and pass it to the single public `PgmqListenerContainer` constructor.
+
+Relative-delay template overloads now pass integer seconds to PostgreSQL, so visibility is based on
+the database clock rather than the application JVM clock.
+
+## Legacy API Migration
 
 ## 1. Replace Imports
 
@@ -227,7 +248,10 @@ Listener defaults live under `pgmq.listener`.
 | `pgmq.listener.batch-size` | `10` |
 | `pgmq.listener.conditional` | `{}` |
 | `pgmq.listener.mode` | `READ` |
-| `pgmq.listener.concurrency` | `1` |
+| `pgmq.listener.consumer-concurrency` | `1` |
+| `pgmq.listener.poll-concurrency` | `1` |
+| `pgmq.listener.max-in-flight` | `10` |
+| `pgmq.listener.executor-shutdown-timeout-seconds` | `30` |
 | `pgmq.listener.auto-startup` | `true` |
 | `pgmq.listener.ack-mode` | `AUTO` |
 | `pgmq.listener.max-poll-seconds` | `5` |
@@ -235,8 +259,9 @@ Listener defaults live under `pgmq.listener`.
 
 `@PgmqListener` annotation values use the configured defaults when left unset. `conditional`
 applies to standard `READ` mode.
-`max-poll-seconds` may be `0`; visibility timeout, batch size, concurrency, and poll interval
-must be positive for listener configuration.
+`max-poll-seconds` and `executor-shutdown-timeout-seconds` may be `0`. Visibility timeout,
+batch size, consumer concurrency, poll concurrency, max in-flight, and poll interval must be
+positive. `max-in-flight` must be greater than or equal to both concurrency values.
 
 ## 9. Review FIFO APIs
 

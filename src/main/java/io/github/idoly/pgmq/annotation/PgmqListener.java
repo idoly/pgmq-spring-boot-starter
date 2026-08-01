@@ -16,7 +16,7 @@ import io.github.idoly.pgmq.listener.AckMode;
  * record, or acknowledgement handle.</p>
  *
  * <pre>{@code
- * @PgmqListener(value = "myQueue", visibilityTimeout = 60, batchSize = 5, concurrency = 2)
+ * @PgmqListener(value = "myQueue", visibilityTimeout = 60, batchSize = 5, consumerConcurrency = 2)
  * public void handle(MyMessage message) {
  *     // handle message
  * }
@@ -98,12 +98,36 @@ public @interface PgmqListener {
     int pollIntervalMs() default -1;
 
     /**
-     * Number of concurrent threads for processing.
-     * Uses {@code pgmq.listener.concurrency} when set to {@code -1}.
+     * Number of concurrent consumer threads.
+     * Uses {@code pgmq.listener.consumer-concurrency} when set to {@code -1}.
      *
-     * @return concurrency level
+     * @return consumer concurrency level
      */
-    int concurrency() default -1;
+    int consumerConcurrency() default -1;
+
+    /**
+     * Number of concurrent database pollers.
+     * Uses {@code pgmq.listener.poll-concurrency} when set to {@code -1}.
+     *
+     * @return poller concurrency level
+     */
+    int pollConcurrency() default -1;
+
+    /**
+     * Maximum number of messages that may be processing or queued for processing.
+     * Uses {@code pgmq.listener.max-in-flight} when set to {@code -1}.
+     *
+     * @return maximum in-flight messages
+     */
+    int maxInFlight() default -1;
+
+    /**
+     * Maximum seconds to wait for each poller or consumer executor shutdown phase.
+     * Uses {@code pgmq.listener.executor-shutdown-timeout-seconds} when set to {@code -1}.
+     *
+     * @return shutdown timeout in seconds
+     */
+    int executorShutdownTimeoutSeconds() default -1;
 
     /**
      * Whether this listener should start automatically.

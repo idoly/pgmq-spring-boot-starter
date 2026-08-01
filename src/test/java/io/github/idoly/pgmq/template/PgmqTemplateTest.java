@@ -29,7 +29,7 @@ import io.github.idoly.pgmq.topic.TopicBinding;
 import io.github.idoly.pgmq.topic.TopicRoute;
 
 @SpringBootTest(classes = PgmqTemplateTest.TestApplication.class)
-@Testcontainers
+@Testcontainers(disabledWithoutDocker = true)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class PgmqTemplateTest extends PostgresPartmanContainerSupport {
 

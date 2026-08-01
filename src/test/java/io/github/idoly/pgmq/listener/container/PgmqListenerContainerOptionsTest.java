@@ -12,38 +12,25 @@ class PgmqListenerContainerOptionsTest {
 
     @Test
     void validatesResolvedRuntimeOptions() {
-        assertDoesNotThrow(() -> options(0, 1));
+        assertDoesNotThrow(() -> options(0, 1, 1, 1, 10, 0));
 
-        assertThrows(IllegalArgumentException.class, () -> options(-1, 1));
-        assertThrows(IllegalArgumentException.class, () -> options(0, 0));
+        assertThrows(IllegalArgumentException.class, () -> options(-1, 1, 1, 1, 10, 30));
+        assertThrows(IllegalArgumentException.class, () -> options(0, 0, 1, 1, 10, 30));
+        assertThrows(IllegalArgumentException.class, () -> options(0, 1, 0, 1, 10, 30));
+        assertThrows(IllegalArgumentException.class, () -> options(0, 1, 1, 0, 10, 30));
+        assertThrows(IllegalArgumentException.class, () -> options(0, 1, 2, 1, 1, 30));
+        assertThrows(IllegalArgumentException.class, () -> options(0, 1, 1, 2, 1, 30));
+        assertThrows(IllegalArgumentException.class, () -> options(0, 1, 1, 1, 10, -1));
         assertThrows(IllegalArgumentException.class, () -> new PgmqListenerContainerOptions(
-                "listener",
-                "queue",
-                30,
-                10,
-                "{}",
-                null,
-                0,
-                1,
-                1,
-                true,
-                AckMode.AUTO
-        ));
+                "listener", "queue", 30, 10, "{}", null, 0, 1,
+                1, 1, 10, 30, true, AckMode.AUTO));
     }
 
-    private static PgmqListenerContainerOptions options(int maxPollSeconds, int pollIntervalMs) {
+    private static PgmqListenerContainerOptions options(int maxPollSeconds, int pollIntervalMs,
+            int consumerConcurrency, int pollConcurrency, int maxInFlight, int shutdownTimeoutSeconds) {
         return new PgmqListenerContainerOptions(
-                "listener",
-                "queue",
-                30,
-                10,
-                "{}",
-                PgmqListener.Mode.READ,
-                maxPollSeconds,
-                pollIntervalMs,
-                1,
-                true,
-                AckMode.AUTO
-        );
+                "listener", "queue", 30, 10, "{}", PgmqListener.Mode.READ,
+                maxPollSeconds, pollIntervalMs, consumerConcurrency, pollConcurrency,
+                maxInFlight, shutdownTimeoutSeconds, true, AckMode.AUTO);
     }
 }
