@@ -32,7 +32,7 @@ jobs:
     name: Unit and integration tests (Podman)
     runs-on: ubuntu-latest
     env:
-      DOCKER_HOST: unix://${{ runner.temp }}/podman.sock
+      DOCKER_HOST: unix:///tmp/pgmq-podman.sock
       TESTCONTAINERS_RYUK_DISABLED: "true"
     steps:
       - uses: actions/checkout@v4
@@ -54,9 +54,9 @@ jobs:
           service_pid=$!
           trap 'kill "$service_pid" 2>/dev/null || true' EXIT
           for attempt in {1..30}; do
-            [ -S "$RUNNER_TEMP/podman.sock" ] && break
+            [ -S "/tmp/pgmq-podman.sock" ] && break
             sleep 1
           done
-          [ -S "$RUNNER_TEMP/podman.sock" ] || { cat "$RUNNER_TEMP/podman.log"; exit 1; }
+          [ -S "/tmp/pgmq-podman.sock" ] || { cat "$RUNNER_TEMP/podman.log"; exit 1; }
           podman info
           mvn --batch-mode --no-transfer-progress test
