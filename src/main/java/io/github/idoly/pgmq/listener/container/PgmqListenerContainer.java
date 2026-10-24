@@ -6,8 +6,6 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import javax.sql.DataSource;
-
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.springframework.context.SmartLifecycle;
@@ -112,15 +110,6 @@ public class PgmqListenerContainer implements SmartLifecycle {
     }
 
     /**
-     * Return the data source used by this listener's polling and acknowledgement calls.
-     *
-     * @return configured data source, or {@code null} for an unconfigured template
-     */
-    public DataSource getDataSource() {
-        return pgmqTemplate.getJdbcTemplate().getDataSource();
-    }
-
-    /**
      * Return the resolved options used by this container.
      *
      * @return listener container options
@@ -190,6 +179,9 @@ public class PgmqListenerContainer implements SmartLifecycle {
                 int unusedPermits = reservedPermits - messages.size();
                 releaseCapacity(run, unusedPermits);
                 reservedPermits -= unusedPermits;
+                if (messages.isEmpty() && listenerOptions.maxPollSeconds() == 0) {
+                    Thread.sleep(listenerOptions.pollIntervalMs());
+                }
 
                 for (PgmqMessage message : messages) {
                     if (!run.active.get()) {

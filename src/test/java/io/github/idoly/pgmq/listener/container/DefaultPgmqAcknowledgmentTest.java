@@ -75,13 +75,25 @@ class DefaultPgmqAcknowledgmentTest {
             assertTrue(releaseDatabase.await(2, java.util.concurrent.TimeUnit.SECONDS));
             return true;
         });
+        var deleteAttempted = new java.util.concurrent.CountDownLatch(1);
+        var deleteStarted = new java.util.concurrent.CountDownLatch(1);
+        when(template.delete("queue", 1L)).thenAnswer(invocation -> {
+            deleteStarted.countDown();
+            return true;
+        });
         var acknowledgment = new DefaultPgmqAcknowledgment(template, "queue", 1L);
         var executor = java.util.concurrent.Executors.newFixedThreadPool(2);
         try {
             var archive = executor.submit(acknowledgment::acknowledge);
             assertTrue(databaseStarted.await(2, java.util.concurrent.TimeUnit.SECONDS));
             assertFalse(acknowledgment.isCompleted(), "completion must wait for the database result");
-            var delete = executor.submit(acknowledgment::delete);
+            var delete = executor.submit(() -> {
+                deleteAttempted.countDown();
+                acknowledgment.delete();
+            });
+            assertTrue(deleteAttempted.await(2, java.util.concurrent.TimeUnit.SECONDS));
+            assertFalse(deleteStarted.await(200, java.util.concurrent.TimeUnit.MILLISECONDS),
+                    "concurrent completion must not execute SQL before the first action finishes");
             releaseDatabase.countDown();
             archive.get(2, java.util.concurrent.TimeUnit.SECONDS);
             delete.get(2, java.util.concurrent.TimeUnit.SECONDS);

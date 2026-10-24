@@ -38,6 +38,8 @@ import io.github.idoly.pgmq.topic.TopicRoute;
  *
  * <p>Messages sent through this template include a {@value #TYPE_HEADER} header
  * so listener arguments can be deserialized with type information.</p>
+ *
+ * <p>A long-poll duration of zero performs one immediate read without waiting.</p>
  */
 public class PgmqTemplate {
 
@@ -159,6 +161,9 @@ public class PgmqTemplate {
         validateMaxPollSeconds(maxPollSeconds);
         validatePollInterval(pollIntervalMs);
         Assert.hasText(conditional, "Conditional must not be empty");
+        if (maxPollSeconds == 0) {
+            return read(queue, vt, qty, conditional);
+        }
         String sql = "select * from pgmq.read_with_poll(?, ?, ?, ?, ?, ?::jsonb)";
         return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty, maxPollSeconds, pollIntervalMs, conditional);
     }
@@ -207,6 +212,9 @@ public class PgmqTemplate {
         validateQuantity(qty);
         validateMaxPollSeconds(maxPollSeconds);
         validatePollInterval(pollIntervalMs);
+        if (maxPollSeconds == 0) {
+            return readGrouped(queue, vt, qty);
+        }
         String sql = "select * from pgmq.read_grouped_with_poll(?, ?, ?, ?, ?)";
         return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty, maxPollSeconds, pollIntervalMs);
     }
@@ -255,6 +263,9 @@ public class PgmqTemplate {
         validateQuantity(qty);
         validateMaxPollSeconds(maxPollSeconds);
         validatePollInterval(pollIntervalMs);
+        if (maxPollSeconds == 0) {
+            return readGroupedRoundRobin(queue, vt, qty);
+        }
         String sql = "select * from pgmq.read_grouped_rr_with_poll(?, ?, ?, ?, ?)";
         return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty, maxPollSeconds, pollIntervalMs);
     }
@@ -303,6 +314,9 @@ public class PgmqTemplate {
         validateQuantity(qty);
         validateMaxPollSeconds(maxPollSeconds);
         validatePollInterval(pollIntervalMs);
+        if (maxPollSeconds == 0) {
+            return readGroupedHead(queue, vt, qty);
+        }
         String sql = "select * from pgmq.read_grouped_head_with_poll(?, ?, ?, ?, ?)";
         return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty, maxPollSeconds, pollIntervalMs);
     }

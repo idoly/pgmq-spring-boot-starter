@@ -7,8 +7,8 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
-import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -26,11 +26,7 @@ import io.github.idoly.pgmq.queue.PgmqQueue;
 import io.github.idoly.pgmq.template.PgmqTemplate;
 
 /**
- * Auto-configuration for the PGMQ Spring Boot starter.
- *
- * <p>Registers the template, initializer, queue declarer, listener
- * infrastructure, and Micrometer binder once {@link JdbcTemplate} is available.
- * Configuration values are supplied by {@link PgmqProperties}.</p>
+ * JDBC-backed PGMQ auto-configuration with optional annotation-driven listeners.
  */
 @AutoConfiguration(afterName = {
         "org.springframework.boot.autoconfigure.jdbc.JdbcTemplateAutoConfiguration",
@@ -41,36 +37,28 @@ import io.github.idoly.pgmq.template.PgmqTemplate;
 @EnableConfigurationProperties(PgmqProperties.class)
 public class PgmqAutoConfiguration {
 
-    /**
-     * Creates the initializer used by queue declaration and direct application calls.
-     */
+    /** Creates the initializer used before queue declaration. */
     @Bean
     @ConditionalOnMissingBean
     public PgmqInitializer pgmqInitializer(JdbcTemplate jdbcTemplate, PgmqProperties properties) {
         return new PgmqInitializer(jdbcTemplate, properties);
     }
 
-    /**
-     * Creates the main {@link PgmqTemplate} client.
-     */
+    /** Creates the SQL client, using the application's mapper when available. */
     @Bean
     @ConditionalOnMissingBean
     public PgmqTemplate pgmqTemplate(JdbcTemplate jdbcTemplate, ObjectProvider<ObjectMapper> objectMapper) {
         return new PgmqTemplate(jdbcTemplate, objectMapper.getIfAvailable(ObjectMapper::new));
     }
 
-    /**
-     * Creates the Micrometer binder for PGMQ metrics.
-     */
+    /** Creates database queue and notification metrics. */
     @Bean
     @ConditionalOnMissingBean
     public PgmqMetricsBinder pgmqMetricsBinder(PgmqTemplate pgmqTemplate) {
         return new PgmqMetricsBinder(pgmqTemplate);
     }
 
-    /**
-     * Creates the declarer that materializes {@code PgmqQueue} beans.
-     */
+    /** Creates declared queues after singleton initialization. */
     @Bean
     @ConditionalOnMissingBean
     public PgmqQueueDeclarer pgmqQueueDeclarer(PgmqTemplate pgmqTemplate, PgmqInitializer pgmqInitializer,
@@ -78,77 +66,48 @@ public class PgmqAutoConfiguration {
         return new PgmqQueueDeclarer(pgmqTemplate, pgmqInitializer, properties, queues);
     }
 
-    /**
-     * Creates the registry that owns listener containers.
-     */
-    @Bean
-    @ConditionalOnMissingBean
+    /** The listener switch applies to the entire listener infrastructure. */
+    @Configuration(proxyBeanMethods = false)
     @ConditionalOnProperty(prefix = "pgmq.listener", name = "enabled", havingValue = "true", matchIfMissing = true)
-    public PgmqListenerEndpointRegistry pgmqListenerEndpointRegistry() {
-        return new PgmqListenerEndpointRegistry();
-    }
+    static class ListenerConfiguration {
 
-    /**
-     * Reports startup connection budgets for listener data sources with a known pool size.
-     */
-    @Bean
-    @ConditionalOnMissingBean
-    @ConditionalOnProperty(prefix = "pgmq.listener", name = "enabled", havingValue = "true", matchIfMissing = true)
-    public PgmqConnectionPoolDiagnostics pgmqConnectionPoolDiagnostics(PgmqListenerEndpointRegistry registry,
-            ApplicationContext applicationContext) {
-        return new PgmqConnectionPoolDiagnostics(registry, applicationContext);
-    }
+        @Bean
+        @ConditionalOnMissingBean
+        PgmqListenerEndpointRegistry pgmqListenerEndpointRegistry() {
+            return new PgmqListenerEndpointRegistry();
+        }
 
-    /**
-     * Creates the default listener error handler.
-     */
-    @Bean
-    @ConditionalOnMissingBean
-    @ConditionalOnProperty(prefix = "pgmq.listener", name = "enabled", havingValue = "true", matchIfMissing = true)
-    public PgmqErrorHandler pgmqErrorHandler() {
-        return new LoggingPgmqErrorHandler();
-    }
+        @Bean
+        @ConditionalOnMissingBean
+        PgmqErrorHandler pgmqErrorHandler() {
+            return new LoggingPgmqErrorHandler();
+        }
 
-    /**
-     * Creates listener execution metrics.
-     */
-    @Bean
-    @ConditionalOnMissingBean
-    @ConditionalOnProperty(prefix = "pgmq.listener", name = "enabled", havingValue = "true", matchIfMissing = true)
-    public PgmqListenerMetrics pgmqListenerMetrics() {
-        return new PgmqListenerMetrics();
-    }
+        @Bean
+        @ConditionalOnMissingBean
+        PgmqListenerMetrics pgmqListenerMetrics() {
+            return new PgmqListenerMetrics();
+        }
 
-    /**
-     * Creates the default factory for listener-owned poller and consumer executors.
-     */
-    @Bean
-    @ConditionalOnMissingBean
-    @ConditionalOnProperty(prefix = "pgmq.listener", name = "enabled", havingValue = "true", matchIfMissing = true)
-    public PgmqListenerExecutorFactory pgmqListenerExecutorFactory() {
-        return new DefaultPgmqListenerExecutorFactory();
-    }
+        @Bean
+        @ConditionalOnMissingBean
+        PgmqListenerExecutorFactory pgmqListenerExecutorFactory() {
+            return new DefaultPgmqListenerExecutorFactory();
+        }
 
-    /**
-     * Creates the default listener container factory.
-     */
-    @Bean(name = "pgmqListenerContainerFactory")
-    @ConditionalOnMissingBean(name = "pgmqListenerContainerFactory")
-    @ConditionalOnProperty(prefix = "pgmq.listener", name = "enabled", havingValue = "true", matchIfMissing = true)
-    public SimplePgmqListenerContainerFactory pgmqListenerContainerFactory(PgmqTemplate pgmqTemplate,
-            PgmqProperties properties, PgmqErrorHandler errorHandler,
-            PgmqListenerExecutorFactory executorFactory, PgmqListenerMetrics listenerMetrics) {
-        return new SimplePgmqListenerContainerFactory(
-                pgmqTemplate, properties, errorHandler, executorFactory, listenerMetrics);
-    }
+        @Bean(name = "pgmqListenerContainerFactory")
+        @ConditionalOnMissingBean(name = "pgmqListenerContainerFactory")
+        SimplePgmqListenerContainerFactory pgmqListenerContainerFactory(PgmqTemplate pgmqTemplate,
+                PgmqProperties properties, PgmqErrorHandler errorHandler,
+                PgmqListenerExecutorFactory executorFactory, PgmqListenerMetrics listenerMetrics) {
+            return new SimplePgmqListenerContainerFactory(
+                    pgmqTemplate, properties, errorHandler, executorFactory, listenerMetrics);
+        }
 
-    /**
-     * Creates the processor that detects {@code @PgmqListener} methods.
-     */
-    @Bean
-    @ConditionalOnMissingBean
-    @ConditionalOnProperty(prefix = "pgmq.listener", name = "enabled", havingValue = "true", matchIfMissing = true)
-    public static PgmqListenerAnnotationBeanPostProcessor pgmqListenerAnnotationBeanPostProcessor() {
-        return new PgmqListenerAnnotationBeanPostProcessor();
+        @Bean
+        @ConditionalOnMissingBean
+        static PgmqListenerAnnotationBeanPostProcessor pgmqListenerAnnotationBeanPostProcessor() {
+            return new PgmqListenerAnnotationBeanPostProcessor();
+        }
     }
 }

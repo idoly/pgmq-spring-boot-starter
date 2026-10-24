@@ -203,6 +203,22 @@ class PgmqTemplateSerializationTest {
     }
 
     @Test
+    void zeroPollDurationPerformsOneImmediateReadInEveryMode() {
+        var jdbcTemplate = new CapturingJdbcTemplate();
+        var template = new PgmqTemplate(jdbcTemplate, objectMapper);
+
+        template.readWithPoll("queue", 30, 2, 0, 100, "{\"kind\":\"created\"}");
+        assertEquals("select * from pgmq.read(?, ?, ?, ?::jsonb)", jdbcTemplate.sql);
+        assertArrayEquals(new Object[] {"queue", 30, 2, "{\"kind\":\"created\"}"}, jdbcTemplate.args);
+        template.readGroupedWithPoll("queue", 30, 2, 0, 100);
+        assertEquals("select * from pgmq.read_grouped(?, ?, ?)", jdbcTemplate.sql);
+        template.readGroupedRoundRobinWithPoll("queue", 30, 2, 0, 100);
+        assertEquals("select * from pgmq.read_grouped_rr(?, ?, ?)", jdbcTemplate.sql);
+        template.readGroupedHeadWithPoll("queue", 30, 2, 0, 100);
+        assertEquals("select * from pgmq.read_grouped_head(?, ?, ?)", jdbcTemplate.sql);
+    }
+
+    @Test
     void rejectsInvalidTemplateArgumentsBeforeSqlCalls() {
         CapturingJdbcTemplate jdbcTemplate = new CapturingJdbcTemplate();
         PgmqTemplate pgmqTemplate = new PgmqTemplate(jdbcTemplate, objectMapper);

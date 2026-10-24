@@ -22,13 +22,9 @@ whole transaction, including time spent on external calls inside it. Account for
 requests, scheduled jobs and metric refreshes in other database work. The budget is an upper
 bound, not a measurement of simultaneous usage.
 
-At context refresh, `PgmqConnectionPoolDiagnostics` groups running listeners by data source,
-unwraps Spring `DelegatingDataSource` wrappers, and reports their long-poll budget. It recognizes
-pools exposing `maximumPoolSize`, including HikariCP. If the poll budget reaches the pool size,
-it logs a warning. It does not borrow connections, resize pools, or inspect PostgreSQL's global
-connection limit. Unknown pools, unresolved pool sizes and listeners started later are not checked.
-Check those cases using your pool's configuration and metrics. Reserve server connections across
-all replicas and other applications as well.
+Use your connection pool's configuration and active, idle and pending connection metrics to
+check this budget. Reserve server connections across all replicas and other applications as well.
+The starter does not infer or change your application's connection pool size.
 
 ## A small queue with low processing latency
 
@@ -53,6 +49,12 @@ pgmq:
 A smaller poll interval can reduce idle delivery latency while increasing PostgreSQL work.
 `max-poll-seconds` controls how long the database call waits, not how long a message may execute.
 Keep JDBC query timeouts above the intended long-poll duration, with room for database latency.
+Configure connection acquisition, query execution and network timeouts for their separate purposes:
+a pool acquisition timeout does not cancel an executing SQL statement, and thread interruption
+alone is not a guarantee that a JDBC driver cancels its query. The SQL polling deadline is checked
+between read attempts, so it also does not bound time spent waiting inside an individual statement.
+A zero `max-poll-seconds` performs one immediate read. After an empty immediate read, a listener
+waits `poll-interval-ms` before trying again. A non-empty read is dispatched immediately.
 
 ## Slow or variable-duration tasks
 
@@ -144,6 +146,25 @@ failure and returning normally in `AUTO` mode, since normal return triggers ackn
 FIFO SQL read modes control selection; concurrent handlers can still finish in a different order.
 If business completion order matters, define the required per-group execution contract before
 increasing concurrency.
+
+## Run the JDBC and Spring lifecycle checks
+
+The JDBC lifecycle tests can run against an explicitly supplied disposable PostgreSQL database,
+without Testcontainers or pg_partman. They install PGMQ when needed and create temporary queues
+and a business table. Use a dedicated test database and an account allowed to install the bundled
+schema. For example, in Bash:
+
+```shell
+export PGMQ_TEST_JDBC_URL=jdbc:postgresql://127.0.0.1:5432/pgmq_test
+export PGMQ_TEST_USERNAME=postgres
+export PGMQ_TEST_PASSWORD=postgres
+mvn '-Dtest=PgmqJdbcLifecycleIntegrationTest' test
+```
+
+Without `PGMQ_TEST_JDBC_URL`, this test class is skipped. It checks zero-duration reads, empty-poll
+spacing, two listeners sharing two connections, acquisition timeout, slow-query cancellation,
+shutdown bounds, and Spring transactional rollback of business work together with manual ACK.
+The existing Testcontainers suite continues to cover pg_partman-dependent operations.
 
 ## Measure before tuning
 

@@ -8,13 +8,21 @@
   capacity or dispatch messages into a restarted container.
 - Kept acknowledgement handles incomplete when completion SQL throws, allowing another attempt;
   serialized concurrent completion calls and reused the same completion logic for automatic ACK.
+- Made zero-duration long-poll calls perform one immediate read in every mode, and added the
+  configured interval between empty immediate listener reads.
+- Stopped registry-owned containers after startup failure and continued shutdown after individual
+  container stop failures.
+
+### Changed
+
+- Applied the listener enablement condition once to the listener configuration group.
 
 ### Added
 
-- Added startup connection-budget diagnostics grouped by listener data source, including HikariCP
-  pools behind Spring data source wrappers. Diagnostics report capacity without opening connections.
 - Added listener configuration examples covering connection budgets, slow tasks, multiple queues,
   transactional acknowledgement and shutdown behavior.
+- Added opt-in JDBC lifecycle tests for a disposable PostgreSQL database, including connection
+  limits, query cancellation and Spring transactional rollback of manual acknowledgements.
 
 ## 2.1-1.13.1
 

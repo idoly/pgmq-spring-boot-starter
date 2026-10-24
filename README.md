@@ -69,7 +69,7 @@ Listener infrastructure is conditional on `pgmq.listener.enabled=true`, which is
 | `pgmq.listener.executor-shutdown-timeout-seconds` | `int` | `30` | Maximum seconds to drain each executor during shutdown. |
 | `pgmq.listener.auto-startup` | `boolean` | `true` | Whether listener containers start with the Spring lifecycle. |
 | `pgmq.listener.ack-mode` | `enum` | `AUTO` | Default acknowledgement mode: `AUTO`, `MANUAL`, or `NONE`. |
-| `pgmq.listener.max-poll-seconds` | `int` | `5` | Maximum seconds a listener long-poll waits for messages. |
+| `pgmq.listener.max-poll-seconds` | `int` | `5` | Maximum seconds a listener long-poll waits; `0` performs one immediate read and waits `poll-interval-ms` after an empty result. |
 | `pgmq.listener.poll-interval-ms` | `int` | `100` | Milliseconds between long-poll attempts. |
 
 Numeric listener properties are validated during binding or listener container creation.
@@ -265,14 +265,14 @@ can be up to twice the configured value. Applications may provide a `PgmqListene
 bean to create custom platform-thread or Java 21 virtual-thread consumer executors. Returned
 executors must be dedicated to one container because the container owns their shutdown lifecycle.
 
-Startup diagnostics report the long-poll connection budget for running listeners on pools exposing
-`maximumPoolSize`, including HikariCP, and warn when it can occupy the entire pool. Diagnostics
-never resize the pool or borrow a connection. See [listener configuration and operation](docs/listener-tuning.md)
-for low-latency, slow-task and multi-queue examples, transaction usage and shutdown limits.
+See [listener configuration and operation](docs/listener-tuning.md) for low-latency, slow-task
+and multi-queue examples, connection budgets, transaction usage and shutdown limits.
 
 Each start/stop cycle owns its execution capacity. Tasks that finish after a stop timeout cannot
 release permits into a restarted container. Completion handles become completed only after the
 completion SQL returns successfully; a database exception leaves the handle available for retry.
+If a listener fails to start, the registry stops its containers before propagating the failure.
+During shutdown, a container stop failure does not prevent the registry from stopping the others.
 
 ## FIFO Reads
 

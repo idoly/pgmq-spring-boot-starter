@@ -4,7 +4,6 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.springframework.context.SmartLifecycle;
 import org.springframework.util.Assert;
@@ -25,7 +24,7 @@ public class PgmqListenerEndpointRegistry implements SmartLifecycle {
     private final Map<String, PgmqListenerContainer> listenerContainers = new LinkedHashMap<>();
 
     /** Registry running state used to guard lifecycle transitions. */
-    private final AtomicBoolean running = new AtomicBoolean(false);
+    private volatile boolean running;
 
     /**
      * Register a listener container for the endpoint.
@@ -46,7 +45,7 @@ public class PgmqListenerEndpointRegistry implements SmartLifecycle {
         PgmqListenerContainer container = factory.createListenerContainer(endpoint);
         listenerContainers.put(id, container);
 
-        if (running.get() && container.isAutoStartup()) {
+        if (running && container.isAutoStartup()) {
             container.start();
         }
     }
@@ -75,12 +74,22 @@ public class PgmqListenerEndpointRegistry implements SmartLifecycle {
      */
     @Override
     public synchronized void start() {
-        if (!running.compareAndSet(false, true)) {
+        if (running) {
             return;
         }
-        listenerContainers.values().stream()
-                .filter(PgmqListenerContainer::isAutoStartup)
-                .forEach(PgmqListenerContainer::start);
+        running = true;
+        try {
+            listenerContainers.values().stream()
+                    .filter(PgmqListenerContainer::isAutoStartup)
+                    .forEach(PgmqListenerContainer::start);
+        } catch (RuntimeException error) {
+            try {
+                stop();
+            } catch (RuntimeException stopError) {
+                error.addSuppressed(stopError);
+            }
+            throw error;
+        }
     }
 
     /**
@@ -88,10 +97,25 @@ public class PgmqListenerEndpointRegistry implements SmartLifecycle {
      */
     @Override
     public synchronized void stop() {
-        if (!running.compareAndSet(true, false)) {
+        if (!running) {
             return;
         }
-        listenerContainers.values().forEach(PgmqListenerContainer::stop);
+        running = false;
+        RuntimeException failure = null;
+        for (PgmqListenerContainer container : listenerContainers.values()) {
+            try {
+                container.stop();
+            } catch (RuntimeException error) {
+                if (failure == null) {
+                    failure = error;
+                } else {
+                    failure.addSuppressed(error);
+                }
+            }
+        }
+        if (failure != null) {
+            throw failure;
+        }
     }
 
     /**
@@ -113,7 +137,7 @@ public class PgmqListenerEndpointRegistry implements SmartLifecycle {
      */
     @Override
     public boolean isRunning() {
-        return running.get();
+        return running;
     }
 
     /**

@@ -1,7 +1,9 @@
 package io.github.idoly.pgmq.listener.endpoint;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -54,6 +56,38 @@ class PgmqListenerEndpointRegistryTest {
 
         assertThrows(PgmqException.class, () -> registry.registerListenerContainer(endpoint, factory));
         assertEquals(1, factory.creates);
+    }
+
+    @Test
+    void failedStartupStopsAllContainersAndResetsRunningState() {
+        var registry = new PgmqListenerEndpointRegistry();
+        var first = container(true);
+        var second = container(true);
+        doThrow(new IllegalStateException("start failed")).when(second).start();
+        registry.registerListenerContainer(new TestEndpoint("first"), new TrackingFactory(first));
+        registry.registerListenerContainer(new TestEndpoint("second"), new TrackingFactory(second));
+
+        assertThrows(IllegalStateException.class, registry::start);
+
+        assertFalse(registry.isRunning());
+        verify(first).stop();
+        verify(second).stop();
+    }
+
+    @Test
+    void failedStopStillStopsRemainingContainers() {
+        var registry = new PgmqListenerEndpointRegistry();
+        var first = container(false);
+        var second = container(false);
+        doThrow(new IllegalStateException("stop failed")).when(first).stop();
+        registry.registerListenerContainer(new TestEndpoint("first"), new TrackingFactory(first));
+        registry.registerListenerContainer(new TestEndpoint("second"), new TrackingFactory(second));
+        registry.start();
+
+        assertThrows(IllegalStateException.class, registry::stop);
+
+        assertFalse(registry.isRunning());
+        verify(second).stop();
     }
 
     private static PgmqListenerContainer container(boolean autoStartup) {
