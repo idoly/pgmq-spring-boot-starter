@@ -1,6 +1,29 @@
 ------------------------------------------------------------
 -- Schema, tables, records, privileges, indexes, etc
 ------------------------------------------------------------
+-- A pre-existing pgmq schema may be writable by a queue creator. Resolve
+-- defaults and generated expressions against trusted built-ins during install.
+-- A local setting lasts through a transaction (including CREATE EXTENSION).
+-- If this file is run statement by statement, the next block detects that the
+-- local setting expired and uses a session setting until the closing block.
+DO $pgmq_install_path$
+BEGIN
+    PERFORM pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true);
+END
+$pgmq_install_path$;
+
+DO $pgmq_install_path$
+DECLARE
+    active_path pg_catalog.text := pg_catalog.current_setting('search_path');
+BEGIN
+    IF NOT (active_path OPERATOR(pg_catalog.=) 'pg_catalog, pg_temp'::pg_catalog.text) THEN
+        PERFORM pg_catalog.set_config('pgmq.install_saved_search_path', active_path, false);
+        PERFORM pg_catalog.set_config('pgmq.install_path_override', '1', false);
+        PERFORM pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', false);
+    END IF;
+END
+$pgmq_install_path$;
+
 -- When installed as an extension, we don't need to create the `pgmq` schema
 -- because it is automatically created by postgres due to being declared in
 -- the extension control file
@@ -21,15 +44,17 @@ CREATE TABLE IF NOT EXISTS pgmq.meta (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL
 );
 
--- Grant permission to pg_monitor to all tables and sequences
+-- pg_monitor can list queues (pgmq.list_queues / pgmq.meta) and compute queue metrics
+-- (pgmq.metrics / pgmq.metrics_all), but it must not read message payloads. It therefore gets
+-- USAGE on the schema and SELECT on pgmq.meta only; the per-queue create functions additionally
+-- grant column-level SELECT on the metrics columns (vt, enqueued_at) of each queue table and
+-- SELECT on the queue's msg_id sequence. It is intentionally NOT granted SELECT on the queue or
+-- archive tables (which hold application data) nor on their message/headers columns.
 -- These grants are intentionally placed here (after creating `pgmq.meta` but before creating other tables). This
 -- allows the `pg_dump` output for a fresh installation to match the output for an installation that followed the
 -- upgrade path.
 GRANT USAGE ON SCHEMA pgmq TO pg_monitor;
-GRANT SELECT ON ALL TABLES IN SCHEMA pgmq TO pg_monitor;
-GRANT SELECT ON ALL SEQUENCES IN SCHEMA pgmq TO pg_monitor;
-ALTER DEFAULT PRIVILEGES IN SCHEMA pgmq GRANT SELECT ON TABLES TO pg_monitor;
-ALTER DEFAULT PRIVILEGES IN SCHEMA pgmq GRANT SELECT ON SEQUENCES TO pg_monitor;
+GRANT SELECT ON pgmq.meta TO pg_monitor;
 
 -- Table to track notification throttling for queues
 CREATE UNLOGGED TABLE IF NOT EXISTS pgmq.notify_insert_throttle (
@@ -38,7 +63,7 @@ CREATE UNLOGGED TABLE IF NOT EXISTS pgmq.notify_insert_throttle (
             REFERENCES pgmq.meta (queue_name)
             ON DELETE CASCADE,
     throttle_interval_ms INTEGER NOT NULL DEFAULT 0, -- Min milliseconds between notifications (0 = no throttling)
-    last_notified_at     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT to_timestamp(0) -- Timestamp of last sent notification
+    last_notified_at     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT pg_catalog.to_timestamp(0) -- Timestamp of last sent notification
 );
 
 CREATE INDEX IF NOT EXISTS idx_notify_throttle_active
@@ -85,7 +110,9 @@ END
 $$;
 
 -- This type has the shape of a message in a queue, and is often returned by
--- pgmq functions that return messages
+-- pgmq functions that return messages.
+-- Note: Changing the order of fields in this type is a breaking change -- our Rust Diesel client implementation
+-- expects a specific order of fields.
 CREATE TYPE pgmq.message_record AS (
     msg_id BIGINT,
     read_ct INTEGER,
@@ -96,6 +123,8 @@ CREATE TYPE pgmq.message_record AS (
     headers JSONB
 );
 
+-- Note: Changing the order of fields in this type is a breaking change -- our Rust Diesel client implementation
+-- expects a specific order of fields.
 CREATE TYPE pgmq.queue_record AS (
     queue_name VARCHAR,
     is_partitioned BOOLEAN,
@@ -107,15 +136,27 @@ CREATE TYPE pgmq.queue_record AS (
 -- Functions
 ------------------------------------------------------------
 
+-- Convention: functions below are SECURITY INVOKER and pin
+-- `SET search_path = pg_catalog, pg_temp` so that unqualified references to
+-- built-in functions, operators, casts and types (and the dynamic SQL these
+-- functions run) resolve against a fixed, non-caller-controlled path rather
+-- than the caller's search_path. Keep this clause on any new function, and on
+-- the notify_queue_listeners trigger function, which runs implicitly under the
+-- inserting role's search_path. The two public partition wrappers are the
+-- exception: their pinned internal implementations call pg_partman, which
+-- changes the session search_path; the wrappers restore the caller's path.
+-- Internal calls into pgmq also use exact argument types to prevent an
+-- attacker-created overload in pgmq from winning. See the security tests.
+
 -- prevents race conditions during queue creation by acquiring a transaction-level advisory lock
 -- uses a transaction advisory lock maintain the lock until transaction commit
 -- a race condition would still exist if lock was released before commit
 CREATE FUNCTION pgmq.acquire_queue_lock(queue_name TEXT)
 RETURNS void AS $$
 BEGIN
-  PERFORM pg_advisory_xact_lock(hashtext('pgmq.queue_' || queue_name));
+  PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('pgmq.queue_' || queue_name));
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- read_grouped_round_robin
 -- reads messages while preserving FIFO within groups and interleaving across groups (layered round-robin)
@@ -127,7 +168,7 @@ CREATE FUNCTION pgmq.read_grouped_rr(
 RETURNS SETOF pgmq.message_record AS $$
 DECLARE
     sql TEXT;
-    qtable TEXT := pgmq.format_table_name(queue_name, 'q');
+    qtable TEXT := pgmq.format_table_name(queue_name, 'q'::pg_catalog.text);
 BEGIN
     sql := FORMAT(
         $QUERY$
@@ -196,11 +237,11 @@ BEGIN
         FROM updated_messages
         ORDER BY selection_order;
         $QUERY$,
-        qtable, qtable, qtable, qtable, qtable, make_interval(secs => vt)
+        qtable, qtable, qtable, qtable, qtable, pg_catalog.make_interval(secs => vt)
     );
     RETURN QUERY EXECUTE sql USING qty;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- read_grouped_rr_with_poll
 -- reads messages using round-robin layering across groups, with polling support
@@ -216,7 +257,7 @@ DECLARE
     r pgmq.message_record;
     stop_at TIMESTAMP;
 BEGIN
-    stop_at := clock_timestamp() + make_interval(secs => max_poll_seconds);
+    stop_at := clock_timestamp() + pg_catalog.make_interval(secs => max_poll_seconds);
     LOOP
       IF (SELECT clock_timestamp() >= stop_at) THEN
         RETURN;
@@ -230,11 +271,11 @@ BEGIN
       IF FOUND THEN
         RETURN;
       ELSE
-        PERFORM pg_sleep(poll_interval_ms::numeric / 1000);
+        PERFORM pg_catalog.pg_sleep(poll_interval_ms::numeric / 1000);
       END IF;
     END LOOP;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- read_grouped_head:  read the head of N different FIFO groups in a single operation.
 -- This supports horizontal scaling by processing groups in parallel while ensuring message ordering is preserved per group.
@@ -246,7 +287,7 @@ CREATE FUNCTION pgmq.read_grouped_head(
 RETURNS SETOF pgmq.message_record AS $$
 DECLARE
     sql TEXT;
-    qtable TEXT := pgmq.format_table_name(queue_name, 'q');
+    qtable TEXT := pgmq.format_table_name(queue_name, 'q'::pg_catalog.text);
 BEGIN
     sql := FORMAT(
         $QUERY$
@@ -277,11 +318,11 @@ BEGIN
         WHERE m.msg_id = sm.msg_id
         RETURNING m.msg_id, m.read_ct, m.enqueued_at, m.last_read_at, m.vt, m.message, m.headers;
         $QUERY$,
-        qtable, make_interval(secs => vt)
+        qtable, pg_catalog.make_interval(secs => vt)
     );
     RETURN QUERY EXECUTE sql USING qty;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- read_grouped_head_with_poll
 -- reads the head of N different FIFO groups in a single operation, with polling support
@@ -297,7 +338,7 @@ DECLARE
     r pgmq.message_record;
     stop_at TIMESTAMPTZ;
 BEGIN
-    stop_at := clock_timestamp() + make_interval(secs => max_poll_seconds);
+    stop_at := clock_timestamp() + pg_catalog.make_interval(secs => max_poll_seconds);
     LOOP
       IF clock_timestamp() >= stop_at THEN
         RETURN;
@@ -311,11 +352,11 @@ BEGIN
       IF FOUND THEN
         RETURN;
       ELSE
-        PERFORM pg_sleep(poll_interval_ms::numeric / 1000);
+        PERFORM pg_catalog.pg_sleep(poll_interval_ms::numeric / 1000);
       END IF;
     END LOOP;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- a helper to format table names and check for invalid characters
 CREATE FUNCTION pgmq.format_table_name(queue_name text, prefix text)
@@ -327,7 +368,7 @@ BEGIN
     END IF;
     RETURN lower(prefix || '_' || queue_name);
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- read
 -- reads a number of messages from a queue, setting a visibility timeout on them
@@ -340,7 +381,7 @@ CREATE FUNCTION pgmq.read(
 RETURNS SETOF pgmq.message_record AS $$
 DECLARE
     sql TEXT;
-    qtable TEXT := pgmq.format_table_name(queue_name, 'q');
+    qtable TEXT := pgmq.format_table_name(queue_name, 'q'::pg_catalog.text);
 BEGIN
     sql := FORMAT(
         $QUERY$
@@ -365,11 +406,11 @@ BEGIN
         WHERE m.msg_id = cte.msg_id
         RETURNING m.msg_id, m.read_ct, m.enqueued_at, m.last_read_at, m.vt, m.message, m.headers;
         $QUERY$,
-        qtable, conditional, qtable, make_interval(secs => vt)
+        qtable, conditional, qtable, pg_catalog.make_interval(secs => vt)
     );
     RETURN QUERY EXECUTE sql USING qty;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- read_grouped
 -- reads messages with AWS SQS FIFO-style batch retrieval behavior
@@ -382,7 +423,7 @@ CREATE FUNCTION pgmq.read_grouped(
 RETURNS SETOF pgmq.message_record AS $$
 DECLARE
     sql TEXT;
-    qtable TEXT := pgmq.format_table_name(queue_name, 'q');
+    qtable TEXT := pgmq.format_table_name(queue_name, 'q'::pg_catalog.text);
 BEGIN
     sql := FORMAT(
         $QUERY$
@@ -465,11 +506,11 @@ BEGIN
         WHERE m.msg_id = sm.msg_id
         RETURNING m.msg_id, m.read_ct, m.enqueued_at, m.last_read_at, m.vt, m.message, m.headers;
         $QUERY$,
-        qtable, qtable, qtable, qtable, qtable, make_interval(secs => vt)
+        qtable, qtable, qtable, qtable, qtable, pg_catalog.make_interval(secs => vt)
     );
     RETURN QUERY EXECUTE sql USING qty;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- read_grouped_with_poll
 -- reads messages with AWS SQS FIFO-style batch retrieval behavior, with polling support
@@ -485,7 +526,7 @@ DECLARE
     r pgmq.message_record;
     stop_at TIMESTAMP;
 BEGIN
-    stop_at := clock_timestamp() + make_interval(secs => max_poll_seconds);
+    stop_at := clock_timestamp() + pg_catalog.make_interval(secs => max_poll_seconds);
     LOOP
       IF (SELECT clock_timestamp() >= stop_at) THEN
         RETURN;
@@ -499,11 +540,11 @@ BEGIN
       IF FOUND THEN
         RETURN;
       ELSE
-        PERFORM pg_sleep(poll_interval_ms::numeric / 1000);
+        PERFORM pg_catalog.pg_sleep(poll_interval_ms::numeric / 1000);
       END IF;
     END LOOP;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 ---- read_with_poll
 ---- reads a number of messages from a queue, setting a visibility timeout on them
@@ -520,9 +561,9 @@ DECLARE
     r pgmq.message_record;
     stop_at TIMESTAMP;
     sql TEXT;
-    qtable TEXT := pgmq.format_table_name(queue_name, 'q');
+    qtable TEXT := pgmq.format_table_name(queue_name, 'q'::pg_catalog.text);
 BEGIN
-    stop_at := clock_timestamp() + make_interval(secs => max_poll_seconds);
+    stop_at := clock_timestamp() + pg_catalog.make_interval(secs => max_poll_seconds);
     LOOP
       IF (SELECT clock_timestamp() >= stop_at) THEN
         RETURN;
@@ -551,7 +592,7 @@ BEGIN
           WHERE m.msg_id = cte.msg_id
           RETURNING m.msg_id, m.read_ct, m.enqueued_at, m.last_read_at, m.vt, m.message, m.headers;
           $QUERY$,
-          qtable, conditional, qtable, make_interval(secs => vt)
+          qtable, conditional, qtable, pg_catalog.make_interval(secs => vt)
       );
 
       FOR r IN
@@ -562,11 +603,11 @@ BEGIN
       IF FOUND THEN
         RETURN;
       ELSE
-        PERFORM pg_sleep(poll_interval_ms::numeric / 1000);
+        PERFORM pg_catalog.pg_sleep(poll_interval_ms::numeric / 1000);
       END IF;
     END LOOP;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 ---- archive
 ---- removes a message from the queue, and sends it to the archive, where its
@@ -579,8 +620,8 @@ RETURNS BOOLEAN AS $$
 DECLARE
     sql TEXT;
     result BIGINT;
-    qtable TEXT := pgmq.format_table_name(queue_name, 'q');
-    atable TEXT := pgmq.format_table_name(queue_name, 'a');
+    qtable TEXT := pgmq.format_table_name(queue_name, 'q'::pg_catalog.text);
+    atable TEXT := pgmq.format_table_name(queue_name, 'a'::pg_catalog.text);
 BEGIN
     sql := FORMAT(
         $QUERY$
@@ -599,7 +640,7 @@ BEGIN
     EXECUTE sql USING msg_id INTO result;
     RETURN NOT (result IS NULL);
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 ---- archive
 ---- removes an array of message ids from the queue, and sends it to the archive,
@@ -611,8 +652,8 @@ CREATE FUNCTION pgmq.archive(
 RETURNS SETOF BIGINT AS $$
 DECLARE
     sql TEXT;
-    qtable TEXT := pgmq.format_table_name(queue_name, 'q');
-    atable TEXT := pgmq.format_table_name(queue_name, 'a');
+    qtable TEXT := pgmq.format_table_name(queue_name, 'q'::pg_catalog.text);
+    atable TEXT := pgmq.format_table_name(queue_name, 'a'::pg_catalog.text);
 BEGIN
     sql := FORMAT(
         $QUERY$
@@ -630,7 +671,7 @@ BEGIN
     );
     RETURN QUERY EXECUTE sql USING msg_ids;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 ---- delete
 ---- deletes a message id from the queue permanently
@@ -642,7 +683,7 @@ RETURNS BOOLEAN AS $$
 DECLARE
     sql TEXT;
     result BIGINT;
-    qtable TEXT := pgmq.format_table_name(queue_name, 'q');
+    qtable TEXT := pgmq.format_table_name(queue_name, 'q'::pg_catalog.text);
 BEGIN
     sql := FORMAT(
         $QUERY$
@@ -655,7 +696,7 @@ BEGIN
     EXECUTE sql USING msg_id INTO result;
     RETURN NOT (result IS NULL);
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 ---- delete
 ---- deletes an array of message ids from the queue permanently
@@ -666,7 +707,7 @@ CREATE FUNCTION pgmq.delete(
 RETURNS SETOF BIGINT AS $$
 DECLARE
     sql TEXT;
-    qtable TEXT := pgmq.format_table_name(queue_name, 'q');
+    qtable TEXT := pgmq.format_table_name(queue_name, 'q'::pg_catalog.text);
 BEGIN
     sql := FORMAT(
         $QUERY$
@@ -678,7 +719,7 @@ BEGIN
     );
     RETURN QUERY EXECUTE sql USING msg_ids;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- send: actual implementation
 CREATE FUNCTION pgmq.send(
@@ -689,7 +730,7 @@ CREATE FUNCTION pgmq.send(
 ) RETURNS SETOF BIGINT AS $$
 DECLARE
     sql TEXT;
-    qtable TEXT := pgmq.format_table_name(queue_name, 'q');
+    qtable TEXT := pgmq.format_table_name(queue_name, 'q'::pg_catalog.text);
 BEGIN
     sql := FORMAT(
             $QUERY$
@@ -701,15 +742,15 @@ BEGIN
            );
     RETURN QUERY EXECUTE sql USING msg, delay, headers;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- send: 2 args, no delay or headers
 CREATE FUNCTION pgmq.send(
     queue_name TEXT,
     msg JSONB
 ) RETURNS SETOF BIGINT AS $$
-    SELECT * FROM pgmq.send(queue_name, msg, NULL, clock_timestamp());
-$$ LANGUAGE sql;
+    SELECT * FROM pgmq.send(queue_name, msg, NULL::pg_catalog.jsonb, clock_timestamp());
+$$ LANGUAGE sql SET search_path = pg_catalog, pg_temp;
 
 -- send: 3 args with headers
 CREATE FUNCTION pgmq.send(
@@ -718,7 +759,7 @@ CREATE FUNCTION pgmq.send(
     headers JSONB
 ) RETURNS SETOF BIGINT AS $$
     SELECT * FROM pgmq.send(queue_name, msg, headers, clock_timestamp());
-$$ LANGUAGE sql;
+$$ LANGUAGE sql SET search_path = pg_catalog, pg_temp;
 
 -- send: 3 args with integer delay
 CREATE FUNCTION pgmq.send(
@@ -726,8 +767,8 @@ CREATE FUNCTION pgmq.send(
     msg JSONB,
     delay INTEGER
 ) RETURNS SETOF BIGINT AS $$
-    SELECT * FROM pgmq.send(queue_name, msg, NULL, clock_timestamp() + make_interval(secs => delay));
-$$ LANGUAGE sql;
+    SELECT * FROM pgmq.send(queue_name, msg, NULL::pg_catalog.jsonb, clock_timestamp() + pg_catalog.make_interval(secs => delay));
+$$ LANGUAGE sql SET search_path = pg_catalog, pg_temp;
 
 -- send: 3 args with timestamp
 CREATE FUNCTION pgmq.send(
@@ -735,8 +776,8 @@ CREATE FUNCTION pgmq.send(
     msg JSONB,
     delay TIMESTAMP WITH TIME ZONE
 ) RETURNS SETOF BIGINT AS $$
-    SELECT * FROM pgmq.send(queue_name, msg, NULL, delay);
-$$ LANGUAGE sql;
+    SELECT * FROM pgmq.send(queue_name, msg, NULL::pg_catalog.jsonb, delay);
+$$ LANGUAGE sql SET search_path = pg_catalog, pg_temp;
 
 -- send: 4 args with integer delay
 CREATE FUNCTION pgmq.send(
@@ -745,8 +786,8 @@ CREATE FUNCTION pgmq.send(
     headers JSONB,
     delay INTEGER
 ) RETURNS SETOF BIGINT AS $$
-    SELECT * FROM pgmq.send(queue_name, msg, headers, clock_timestamp() + make_interval(secs => delay));
-$$ LANGUAGE sql;
+    SELECT * FROM pgmq.send(queue_name, msg, headers, clock_timestamp() + pg_catalog.make_interval(secs => delay));
+$$ LANGUAGE sql SET search_path = pg_catalog, pg_temp;
 
 -- _validate_batch_params: Private function to validate batch parameters
 CREATE FUNCTION pgmq._validate_batch_params(
@@ -766,7 +807,7 @@ BEGIN
             COALESCE(array_length(headers, 1), 0), COALESCE(array_length(msgs, 1), 0);
     END IF;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- _send_batch: Private function that performs the actual batch insert without validation
 CREATE FUNCTION pgmq._send_batch(
@@ -777,7 +818,7 @@ CREATE FUNCTION pgmq._send_batch(
 ) RETURNS SETOF BIGINT AS $$
 DECLARE
     sql TEXT;
-    qtable TEXT := pgmq.format_table_name(queue_name, 'q');
+    qtable TEXT := pgmq.format_table_name(queue_name, 'q'::pg_catalog.text);
 BEGIN
     sql := FORMAT(
             $QUERY$
@@ -789,7 +830,7 @@ BEGIN
            );
     RETURN QUERY EXECUTE sql USING msgs, delay, headers;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- send_batch: Public function with validation
 CREATE FUNCTION pgmq.send_batch(
@@ -802,15 +843,15 @@ BEGIN
     PERFORM pgmq._validate_batch_params(msgs, headers);
     RETURN QUERY SELECT * FROM pgmq._send_batch(queue_name, msgs, headers, delay);
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- send batch: 2 args
 CREATE FUNCTION pgmq.send_batch(
     queue_name TEXT,
     msgs JSONB[]
 ) RETURNS SETOF BIGINT AS $$
-    SELECT * FROM pgmq.send_batch(queue_name, msgs, NULL, clock_timestamp());
-$$ LANGUAGE sql;
+    SELECT * FROM pgmq.send_batch(queue_name, msgs, NULL::pg_catalog.jsonb[], clock_timestamp());
+$$ LANGUAGE sql SET search_path = pg_catalog, pg_temp;
 
 -- send batch: 3 args with headers
 CREATE FUNCTION pgmq.send_batch(
@@ -819,7 +860,7 @@ CREATE FUNCTION pgmq.send_batch(
     headers JSONB[]
 ) RETURNS SETOF BIGINT AS $$
     SELECT * FROM pgmq.send_batch(queue_name, msgs, headers, clock_timestamp());
-$$ LANGUAGE sql;
+$$ LANGUAGE sql SET search_path = pg_catalog, pg_temp;
 
 -- send batch: 3 args with integer delay
 CREATE FUNCTION pgmq.send_batch(
@@ -827,8 +868,8 @@ CREATE FUNCTION pgmq.send_batch(
     msgs JSONB[],
     delay INTEGER
 ) RETURNS SETOF BIGINT AS $$
-    SELECT * FROM pgmq.send_batch(queue_name, msgs, NULL, clock_timestamp() + make_interval(secs => delay));
-$$ LANGUAGE sql;
+    SELECT * FROM pgmq.send_batch(queue_name, msgs, NULL::pg_catalog.jsonb[], clock_timestamp() + pg_catalog.make_interval(secs => delay));
+$$ LANGUAGE sql SET search_path = pg_catalog, pg_temp;
 
 -- send batch: 3 args with timestamp
 CREATE FUNCTION pgmq.send_batch(
@@ -836,8 +877,8 @@ CREATE FUNCTION pgmq.send_batch(
     msgs JSONB[],
     delay TIMESTAMP WITH TIME ZONE
 ) RETURNS SETOF BIGINT AS $$
-    SELECT * FROM pgmq.send_batch(queue_name, msgs, NULL, delay);
-$$ LANGUAGE sql;
+    SELECT * FROM pgmq.send_batch(queue_name, msgs, NULL::pg_catalog.jsonb[], delay);
+$$ LANGUAGE sql SET search_path = pg_catalog, pg_temp;
 
 -- send_batch: 4 args with integer delay
 CREATE FUNCTION pgmq.send_batch(
@@ -846,10 +887,12 @@ CREATE FUNCTION pgmq.send_batch(
     headers JSONB[],
     delay INTEGER
 ) RETURNS SETOF BIGINT AS $$
-    SELECT * FROM pgmq.send_batch(queue_name, msgs, headers, clock_timestamp() + make_interval(secs => delay));
-$$ LANGUAGE sql;
+    SELECT * FROM pgmq.send_batch(queue_name, msgs, headers, clock_timestamp() + pg_catalog.make_interval(secs => delay));
+$$ LANGUAGE sql SET search_path = pg_catalog, pg_temp;
 
 -- returned by pgmq.metrics() and pgmq.metrics_all
+-- Note: Changing the order of fields in this type is a breaking change -- our Rust Diesel client implementation
+-- expects a specific order of fields.
 CREATE TYPE pgmq.metrics_result AS (
     queue_name text,
     queue_length bigint,
@@ -857,7 +900,8 @@ CREATE TYPE pgmq.metrics_result AS (
     oldest_msg_age_sec int,
     total_messages bigint,
     scrape_time timestamp with time zone,
-    queue_visible_length bigint
+    queue_visible_length bigint,
+    default_partition_length bigint
 );
 
 -- get metrics for a single queue
@@ -866,8 +910,25 @@ RETURNS pgmq.metrics_result AS $$
 DECLARE
     result_row pgmq.metrics_result;
     query TEXT;
-    qtable TEXT := pgmq.format_table_name(queue_name, 'q');
+    qtable TEXT := pgmq.format_table_name(queue_name, 'q'::pg_catalog.text);
+    q_default_partition TEXT := qtable || '_default';
+    a_default_partition TEXT := pgmq.format_table_name(queue_name, 'a'::pg_catalog.text) || '_default';
+    default_partition_length BIGINT;
 BEGIN
+    -- Only partitioned queues have default partitions. Messages in them have no
+    -- partition of their own, which means pg_partman maintenance is failing for
+    -- this queue; a non-zero value here is the signal to act on. The planner's
+    -- estimate is used so that a large spill does not slow down every scrape.
+    IF to_regclass(FORMAT('pgmq.%I', q_default_partition)) IS NOT NULL THEN
+        SELECT COALESCE(SUM(GREATEST(c.reltuples, 0))::bigint, 0)
+        INTO default_partition_length
+        FROM pg_class c
+        WHERE c.oid IN (
+            to_regclass(FORMAT('pgmq.%I', q_default_partition)),
+            to_regclass(FORMAT('pgmq.%I', a_default_partition))
+        );
+    END IF;
+
     query := FORMAT(
         $QUERY$
         WITH q_summary AS (
@@ -892,15 +953,16 @@ BEGIN
             q_summary.oldest_msg_age_sec,
             all_metrics.total_messages,
             q_summary.scrape_time,
-            q_summary.queue_visible_length
+            q_summary.queue_visible_length,
+            %L::bigint as default_partition_length
         FROM q_summary, all_metrics
         $QUERY$,
-        qtable, qtable || '_msg_id_seq', queue_name
+        qtable, qtable || '_msg_id_seq', queue_name, default_partition_length
     );
     EXECUTE query INTO result_row;
     RETURN result_row;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- get metrics for all queues
 CREATE FUNCTION pgmq."metrics_all"()
@@ -910,11 +972,11 @@ DECLARE
     result_row pgmq.metrics_result;
 BEGIN
     FOR row_name IN SELECT queue_name FROM pgmq.meta LOOP
-        result_row := pgmq.metrics(row_name.queue_name);
+        result_row := pgmq.metrics(row_name.queue_name::pg_catalog.text);
         RETURN NEXT result_row;
     END LOOP;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- list queues
 CREATE FUNCTION pgmq."list_queues"()
@@ -922,14 +984,14 @@ RETURNS SETOF pgmq.queue_record AS $$
 BEGIN
   RETURN QUERY SELECT * FROM pgmq.meta;
 END
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- purge queue, deleting all entries in it.
 CREATE OR REPLACE FUNCTION pgmq."purge_queue"(queue_name TEXT)
 RETURNS BIGINT AS $$
 DECLARE
   deleted_count INTEGER;
-  qtable TEXT := pgmq.format_table_name(queue_name, 'q');
+  qtable TEXT := pgmq.format_table_name(queue_name, 'q'::pg_catalog.text);
 BEGIN
   -- Get the row count before truncating
   EXECUTE format('SELECT count(*) FROM pgmq.%I', qtable) INTO deleted_count;
@@ -940,17 +1002,17 @@ BEGIN
   -- Return the number of purged rows
   RETURN deleted_count;
 END
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- unassign archive, so it can be kept when a queue is deleted
 CREATE FUNCTION pgmq."detach_archive"(queue_name TEXT)
 RETURNS VOID AS $$
 DECLARE
-  atable TEXT := pgmq.format_table_name(queue_name, 'a');
+  atable TEXT := pgmq.format_table_name(queue_name, 'a'::pg_catalog.text);
 BEGIN
   RAISE WARNING 'detach_archive(queue_name) is deprecated and is a no-op. It will be removed in PGMQ v2.0. Archive tables are no longer member objects.';
 END
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- pop: implementation
 CREATE FUNCTION pgmq.pop(queue_name TEXT, qty INTEGER DEFAULT 1)
@@ -958,7 +1020,7 @@ RETURNS SETOF pgmq.message_record AS $$
 DECLARE
     sql TEXT;
     result pgmq.message_record;
-    qtable TEXT := pgmq.format_table_name(queue_name, 'q');
+    qtable TEXT := pgmq.format_table_name(queue_name, 'q'::pg_catalog.text);
 BEGIN
     sql := FORMAT(
         $QUERY$
@@ -979,7 +1041,7 @@ BEGIN
     );
     RETURN QUERY EXECUTE sql USING qty;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- Sets timestamp vt of a message, returns it
 CREATE FUNCTION pgmq.set_vt(queue_name TEXT, msg_id BIGINT, vt TIMESTAMP WITH TIME ZONE)
@@ -987,7 +1049,7 @@ RETURNS SETOF pgmq.message_record AS $$
 DECLARE
     sql TEXT;
     result pgmq.message_record;
-    qtable TEXT := pgmq.format_table_name(queue_name, 'q');
+    qtable TEXT := pgmq.format_table_name(queue_name, 'q'::pg_catalog.text);
 BEGIN
     sql := FORMAT(
         $QUERY$
@@ -1000,13 +1062,13 @@ BEGIN
     );
     RETURN QUERY EXECUTE sql USING vt, msg_id;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- Sets integer vt of a message, returns it
 CREATE FUNCTION pgmq.set_vt(queue_name TEXT, msg_id BIGINT, vt INTEGER)
 RETURNS SETOF pgmq.message_record AS $$
-    SELECT * FROM pgmq.set_vt(queue_name, msg_id, clock_timestamp() + make_interval(secs => vt));
-$$ LANGUAGE sql;
+    SELECT * FROM pgmq.set_vt(queue_name, msg_id, clock_timestamp() + pg_catalog.make_interval(secs => vt));
+$$ LANGUAGE sql SET search_path = pg_catalog, pg_temp;
 
 -- Sets timestamp vt of multiple messages, returns them
 CREATE FUNCTION pgmq.set_vt(
@@ -1017,7 +1079,7 @@ CREATE FUNCTION pgmq.set_vt(
 RETURNS SETOF pgmq.message_record AS $$
 DECLARE
     sql TEXT;
-    qtable TEXT := pgmq.format_table_name(queue_name, 'q');
+    qtable TEXT := pgmq.format_table_name(queue_name, 'q'::pg_catalog.text);
 BEGIN
     sql := FORMAT(
         $QUERY$
@@ -1030,7 +1092,7 @@ BEGIN
     );
     RETURN QUERY EXECUTE sql USING vt, msg_ids;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- Sets integer vt of multiple messages, returns them
 CREATE FUNCTION pgmq.set_vt(
@@ -1039,8 +1101,8 @@ CREATE FUNCTION pgmq.set_vt(
     vt INTEGER
 )
 RETURNS SETOF pgmq.message_record AS $$
-    SELECT * FROM pgmq.set_vt(queue_name, msg_ids, clock_timestamp() + make_interval(secs => vt));
-$$ LANGUAGE sql;
+    SELECT * FROM pgmq.set_vt(queue_name, msg_ids, clock_timestamp() + pg_catalog.make_interval(secs => vt));
+$$ LANGUAGE sql SET search_path = pg_catalog, pg_temp;
 
 CREATE FUNCTION pgmq._get_pg_partman_schema()
 RETURNS TEXT AS $$
@@ -1050,14 +1112,14 @@ RETURNS TEXT AS $$
     pg_extension
   WHERE
     extname = 'pg_partman';
-$$ LANGUAGE SQL;
+$$ LANGUAGE SQL SET search_path = pg_catalog, pg_temp;
 
 CREATE FUNCTION pgmq.drop_queue(queue_name TEXT, partitioned BOOLEAN)
 RETURNS BOOLEAN AS $$
 DECLARE
-    qtable TEXT := pgmq.format_table_name(queue_name, 'q');
+    qtable TEXT := pgmq.format_table_name(queue_name, 'q'::pg_catalog.text);
     fq_qtable TEXT := 'pgmq.' || qtable;
-    atable TEXT := pgmq.format_table_name(queue_name, 'a');
+    atable TEXT := pgmq.format_table_name(queue_name, 'a'::pg_catalog.text);
     fq_atable TEXT := 'pgmq.' || atable;
 BEGIN
     RAISE WARNING 'drop_queue(queue_name, partitioned) is deprecated and will be removed in PGMQ v2.0. Use drop_queue(queue_name) instead';
@@ -1066,15 +1128,15 @@ BEGIN
 
     RETURN TRUE;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 CREATE FUNCTION pgmq.drop_queue(queue_name TEXT)
 RETURNS BOOLEAN AS $$
 DECLARE
-    qtable TEXT := pgmq.format_table_name(queue_name, 'q');
+    qtable TEXT := pgmq.format_table_name(queue_name, 'q'::pg_catalog.text);
     qtable_seq TEXT := qtable || '_msg_id_seq';
     fq_qtable TEXT := 'pgmq.' || qtable;
-    atable TEXT := pgmq.format_table_name(queue_name, 'a');
+    atable TEXT := pgmq.format_table_name(queue_name, 'a'::pg_catalog.text);
     fq_atable TEXT := 'pgmq.' || atable;
     partitioned BOOLEAN;
 BEGIN
@@ -1134,7 +1196,7 @@ BEGIN
 
     RETURN TRUE;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 CREATE FUNCTION pgmq.validate_queue_name(queue_name TEXT)
 RETURNS void AS $$
@@ -1147,7 +1209,7 @@ BEGIN
     RAISE EXCEPTION 'queue name is too long, maximum length is 47 characters';
   END IF;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 CREATE FUNCTION pgmq._belongs_to_pgmq(table_name TEXT)
 RETURNS BOOLEAN AS $$
@@ -1167,14 +1229,14 @@ BEGIN
   ) INTO result;
   RETURN result;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 CREATE FUNCTION pgmq.create_non_partitioned(queue_name TEXT)
 RETURNS void AS $$
 DECLARE
-  qtable TEXT := pgmq.format_table_name(queue_name, 'q');
+  qtable TEXT := pgmq.format_table_name(queue_name, 'q'::pg_catalog.text);
   qtable_seq TEXT := qtable || '_msg_id_seq';
-  atable TEXT := pgmq.format_table_name(queue_name, 'a');
+  atable TEXT := pgmq.format_table_name(queue_name, 'a'::pg_catalog.text);
 BEGIN
   PERFORM pgmq.validate_queue_name(queue_name);
   PERFORM pgmq.acquire_queue_lock(queue_name);
@@ -1234,15 +1296,20 @@ BEGIN
     queue_name
   );
 
+  -- Let pg_monitor compute queue metrics (pgmq.metrics / pgmq.metrics_all) without exposing
+  -- message payloads: column-level SELECT on the metrics columns only, plus the msg_id sequence.
+  EXECUTE FORMAT('GRANT SELECT (vt, enqueued_at) ON pgmq.%I TO pg_monitor', qtable);
+  EXECUTE FORMAT('GRANT SELECT ON SEQUENCE pgmq.%I TO pg_monitor', qtable_seq);
+
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 CREATE FUNCTION pgmq.create_unlogged(queue_name TEXT)
 RETURNS void AS $$
 DECLARE
-  qtable TEXT := pgmq.format_table_name(queue_name, 'q');
+  qtable TEXT := pgmq.format_table_name(queue_name, 'q'::pg_catalog.text);
   qtable_seq TEXT := qtable || '_msg_id_seq';
-  atable TEXT := pgmq.format_table_name(queue_name, 'a');
+  atable TEXT := pgmq.format_table_name(queue_name, 'a'::pg_catalog.text);
 BEGIN
   PERFORM pgmq.validate_queue_name(queue_name);
   PERFORM pgmq.acquire_queue_lock(queue_name);
@@ -1301,8 +1368,13 @@ BEGIN
     $QUERY$,
     queue_name
   );
+
+  -- Let pg_monitor compute queue metrics (pgmq.metrics / pgmq.metrics_all) without exposing
+  -- message payloads: column-level SELECT on the metrics columns only, plus the msg_id sequence.
+  EXECUTE FORMAT('GRANT SELECT (vt, enqueued_at) ON pgmq.%I TO pg_monitor', qtable);
+  EXECUTE FORMAT('GRANT SELECT ON SEQUENCE pgmq.%I TO pg_monitor', qtable_seq);
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 CREATE FUNCTION pgmq._get_partition_col(partition_interval TEXT)
 RETURNS TEXT AS $$
@@ -1317,11 +1389,12 @@ BEGIN
             RETURN 'enqueued_at';
     END;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 CREATE FUNCTION pgmq._extension_exists(extension_name TEXT)
     RETURNS BOOLEAN
     LANGUAGE SQL
+    SET search_path = pg_catalog, pg_temp
 AS $$
 SELECT EXISTS (
     SELECT 1
@@ -1333,45 +1406,52 @@ $$;
 CREATE FUNCTION pgmq._ensure_pg_partman_installed()
 RETURNS void AS $$
 BEGIN
-  IF NOT pgmq._extension_exists('pg_partman') THEN
+  IF NOT pgmq._extension_exists('pg_partman'::pg_catalog.text) THEN
     RAISE EXCEPTION 'pg_partman is required for partitioned queues';
   END IF;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 CREATE FUNCTION pgmq._get_pg_partman_major_version()
 RETURNS INT
 LANGUAGE SQL
+    SET search_path = pg_catalog, pg_temp
 AS $$
   SELECT split_part(extversion, '.', 1)::INT
   FROM pg_extension
   WHERE extname = 'pg_partman'
 $$;
 
-CREATE FUNCTION pgmq.create_partitioned(
+-- pg_partman.create_parent uses set_config(..., false). Keep its side effect
+-- inside the implementation, then restore the caller's path in the wrapper.
+CREATE FUNCTION pgmq._create_partitioned(
   queue_name TEXT,
-  partition_interval TEXT DEFAULT '10000',
-  retention_interval TEXT DEFAULT '100000'
+  partition_interval TEXT,
+  retention_interval TEXT,
+  premake INTEGER
 )
 RETURNS void AS $$
 DECLARE
   partition_col TEXT;
   a_partition_col TEXT;
-  qtable TEXT := pgmq.format_table_name(queue_name, 'q');
+  qtable TEXT := pgmq.format_table_name(queue_name, 'q'::pg_catalog.text);
   qtable_seq TEXT := qtable || '_msg_id_seq';
-  atable TEXT := pgmq.format_table_name(queue_name, 'a');
+  atable TEXT := pgmq.format_table_name(queue_name, 'a'::pg_catalog.text);
   fq_qtable TEXT := 'pgmq.' || qtable;
   fq_atable TEXT := 'pgmq.' || atable;
 BEGIN
   PERFORM pgmq.validate_queue_name(queue_name);
   PERFORM pgmq.acquire_queue_lock(queue_name);
   PERFORM pgmq._ensure_pg_partman_installed();
+  IF premake < 1 THEN
+    RAISE EXCEPTION 'premake must be at least 1, got %', premake;
+  END IF;
   SELECT pgmq._get_partition_col(partition_interval) INTO partition_col;
 
   EXECUTE FORMAT(
     $QUERY$
     CREATE TABLE IF NOT EXISTS pgmq.%I (
-        msg_id BIGINT GENERATED ALWAYS AS IDENTITY,
+        msg_id BIGINT GENERATED BY DEFAULT AS IDENTITY,
         read_ct INT DEFAULT 0 NOT NULL,
         enqueued_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
         last_read_at TIMESTAMP WITH TIME ZONE,
@@ -1391,6 +1471,7 @@ BEGIN
       p_parent_table := %L,
       p_control := %L,
       p_interval := %L,
+      p_premake := %s,
       p_type := case
         when pgmq._get_pg_partman_major_version() = 5 then 'range'
         else 'native'
@@ -1400,7 +1481,8 @@ BEGIN
     pgmq._get_pg_partman_schema(),
     fq_qtable,
     partition_col,
-    partition_interval
+    partition_interval,
+    premake
   );
 
   EXECUTE FORMAT(
@@ -1465,6 +1547,7 @@ BEGIN
       p_parent_table := %L,
       p_control := %L,
       p_interval := %L,
+      p_premake := %s,
       p_type := case
         when pgmq._get_pg_partman_major_version() = 5 then 'range'
         else 'native'
@@ -1474,7 +1557,8 @@ BEGIN
     pgmq._get_pg_partman_schema(),
     fq_atable,
     a_partition_col,
-    partition_interval
+    partition_interval,
+    premake
   );
 
   EXECUTE FORMAT(
@@ -1499,6 +1583,30 @@ BEGIN
     'archived_at_idx_' || queue_name, atable
   );
 
+  -- Let pg_monitor compute queue metrics (pgmq.metrics / pgmq.metrics_all) without exposing
+  -- message payloads: column-level SELECT on the metrics columns only, plus the msg_id sequence.
+  -- For partitioned queues, granting on the parent is sufficient: metrics query the parent and
+  -- the privilege check is performed there, not on individual partitions.
+  EXECUTE FORMAT('GRANT SELECT (vt, enqueued_at) ON pgmq.%I TO pg_monitor', qtable);
+  EXECUTE FORMAT('GRANT SELECT ON SEQUENCE pgmq.%I TO pg_monitor', qtable_seq);
+
+END;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
+
+CREATE FUNCTION pgmq.create_partitioned(
+  queue_name TEXT,
+  partition_interval TEXT DEFAULT '10000',
+  retention_interval TEXT DEFAULT '100000',
+  premake INTEGER DEFAULT 4
+)
+RETURNS void AS $$
+DECLARE
+  caller_path pg_catalog.text := pg_catalog.current_setting('search_path');
+BEGIN
+  PERFORM pgmq._create_partitioned(queue_name, partition_interval, retention_interval, premake);
+  IF NOT (pg_catalog.current_setting('search_path') OPERATOR(pg_catalog.=) caller_path) THEN
+    PERFORM pg_catalog.set_config('search_path', caller_path, false);
+  END IF;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -1507,14 +1615,14 @@ RETURNS void AS $$
 BEGIN
     PERFORM pgmq.create_non_partitioned(queue_name);
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- _create_fifo_index_if_not_exists
 -- internal function to create GIN index on headers for better FIFO performance
 CREATE OR REPLACE FUNCTION pgmq._create_fifo_index_if_not_exists(queue_name TEXT)
 RETURNS void AS $$
 DECLARE
-    qtable TEXT := pgmq.format_table_name(queue_name, 'q');
+    qtable TEXT := pgmq.format_table_name(queue_name, 'q'::pg_catalog.text);
     index_name TEXT := qtable || '_fifo_idx';
 BEGIN
     -- Create GIN index on headers for efficient FIFO key lookups
@@ -1525,7 +1633,7 @@ BEGIN
         index_name, qtable
     );
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- create_fifo_index
 -- creates a GIN index on the headers column to improve FIFO read performance
@@ -1534,7 +1642,7 @@ RETURNS void AS $$
 BEGIN
     PERFORM pgmq._create_fifo_index_if_not_exists(queue_name);
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 -- create_fifo_indexes_all
 -- creates FIFO indexes on all existing queues
@@ -1544,21 +1652,21 @@ DECLARE
     queue_record RECORD;
 BEGIN
     FOR queue_record IN SELECT queue_name FROM pgmq.meta LOOP
-        PERFORM pgmq.create_fifo_index(queue_record.queue_name);
+        PERFORM pgmq.create_fifo_index(queue_record.queue_name::pg_catalog.text);
     END LOOP;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
-CREATE OR REPLACE FUNCTION pgmq.convert_archive_partitioned(
+CREATE OR REPLACE FUNCTION pgmq._convert_archive_partitioned(
   table_name TEXT,
-  partition_interval TEXT DEFAULT '10000',
-  retention_interval TEXT DEFAULT '100000',
-  leading_partition INT DEFAULT 10
+  partition_interval TEXT,
+  retention_interval TEXT,
+  leading_partition INT
 )
 RETURNS void AS $$
 DECLARE
-  a_table_name TEXT := pgmq.format_table_name(table_name, 'a');
-  a_table_name_old TEXT := pgmq.format_table_name(table_name, 'a') || '_old';
+  a_table_name TEXT := pgmq.format_table_name(table_name, 'a'::pg_catalog.text);
+  a_table_name_old TEXT := pgmq.format_table_name(table_name, 'a'::pg_catalog.text) || '_old';
   qualified_a_table_name TEXT := format('pgmq.%I', a_table_name);
   partition_col TEXT;
   a_partition_col TEXT;
@@ -1645,40 +1753,62 @@ BEGIN
     qualified_a_table_name
   );
 END;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
+
+CREATE OR REPLACE FUNCTION pgmq.convert_archive_partitioned(
+  table_name TEXT,
+  partition_interval TEXT DEFAULT '10000',
+  retention_interval TEXT DEFAULT '100000',
+  leading_partition INT DEFAULT 10
+)
+RETURNS void AS $$
+DECLARE
+  caller_path pg_catalog.text := pg_catalog.current_setting('search_path');
+BEGIN
+  PERFORM pgmq._convert_archive_partitioned(table_name, partition_interval, retention_interval, leading_partition);
+  IF NOT (pg_catalog.current_setting('search_path') OPERATOR(pg_catalog.=) caller_path) THEN
+    PERFORM pg_catalog.set_config('search_path', caller_path, false);
+  END IF;
+END;
 $$ LANGUAGE plpgsql;
 
 CREATE OR REPLACE FUNCTION pgmq.notify_queue_listeners()
 RETURNS TRIGGER AS $$
 DECLARE
-  queue_name_extracted TEXT; -- Queue name extracted from trigger table name
-  updated_count        INTEGER; -- Number of rows updated (0 or 1)
+  v_queue_name  TEXT; -- Queue name, as stored in pgmq.meta
+  updated_count INTEGER; -- Number of rows updated (0 or 1)
 BEGIN
-  queue_name_extracted := substring(TG_TABLE_NAME from 3);
+  -- enable_notify_insert passes the queue name as a trigger argument. The table
+  -- name cannot be turned back into it: format_table_name lowercases, so the
+  -- queue MyQueue lives in pgmq.q_myqueue and stripping the prefix yields
+  -- myqueue, which matches no row in notify_insert_throttle. Triggers created
+  -- before the argument existed fall back to the table name.
+  v_queue_name := COALESCE(TG_ARGV[0], substring(TG_TABLE_NAME from 3));
 
   UPDATE pgmq.notify_insert_throttle
   SET last_notified_at = clock_timestamp()
-  WHERE queue_name = queue_name_extracted
+  WHERE queue_name = v_queue_name
     AND (
       throttle_interval_ms = 0 -- No throttling configured
           OR clock_timestamp() - last_notified_at >=
-             (throttle_interval_ms * INTERVAL '1 millisecond') -- Throttle interval has elapsed
+             (throttle_interval_ms OPERATOR(pg_catalog.*) INTERVAL '1 millisecond') -- Throttle interval has elapsed
     );
 
   -- Check how many rows were updated (will be 0 or 1)
   GET DIAGNOSTICS updated_count = ROW_COUNT;
 
   IF updated_count > 0 THEN
-    PERFORM PG_NOTIFY('pgmq.' || TG_TABLE_NAME || '.' || TG_OP, NULL);
+    PERFORM PG_NOTIFY('pgmq.q_' || v_queue_name || '.' || TG_OP, NULL);
   END IF;
 
 RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 CREATE OR REPLACE FUNCTION pgmq.enable_notify_insert(queue_name TEXT, throttle_interval_ms INTEGER DEFAULT 250)
 RETURNS void AS $$
 DECLARE
-  qtable TEXT := pgmq.format_table_name(queue_name, 'q');
+  qtable TEXT := pgmq.format_table_name(queue_name, 'q'::pg_catalog.text);
   v_queue_name TEXT := queue_name;
   v_throttle_interval_ms INTEGER := throttle_interval_ms;
 BEGIN
@@ -1698,24 +1828,24 @@ BEGIN
   VALUES (v_queue_name, v_throttle_interval_ms)
   ON CONFLICT ON CONSTRAINT notify_insert_throttle_queue_name_key DO UPDATE
       SET throttle_interval_ms = EXCLUDED.throttle_interval_ms,
-          last_notified_at = to_timestamp(0);
+          last_notified_at = pg_catalog.to_timestamp(0);
 
   EXECUTE FORMAT(
     $QUERY$
     CREATE CONSTRAINT TRIGGER trigger_notify_queue_insert_listeners
     AFTER INSERT ON pgmq.%I
     DEFERRABLE FOR EACH ROW
-    EXECUTE PROCEDURE pgmq.notify_queue_listeners()
+    EXECUTE PROCEDURE pgmq.notify_queue_listeners(%L)
     $QUERY$,
-    qtable
+    qtable, v_queue_name
   );
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 CREATE OR REPLACE FUNCTION pgmq.disable_notify_insert(queue_name TEXT)
 RETURNS void AS $$
 DECLARE
-  qtable TEXT := pgmq.format_table_name(queue_name, 'q');
+  qtable TEXT := pgmq.format_table_name(queue_name, 'q'::pg_catalog.text);
   v_queue_name TEXT := queue_name;
 BEGIN
   EXECUTE FORMAT(
@@ -1727,7 +1857,7 @@ BEGIN
 
   DELETE FROM pgmq.notify_insert_throttle nit WHERE nit.queue_name = v_queue_name;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
 CREATE OR REPLACE FUNCTION pgmq.list_notify_insert_throttles()
     RETURNS TABLE
@@ -1738,6 +1868,7 @@ CREATE OR REPLACE FUNCTION pgmq.list_notify_insert_throttles()
             )
     LANGUAGE sql
     STABLE
+    SET search_path = pg_catalog, pg_temp
 AS
 $$
     SELECT queue_name, throttle_interval_ms, last_notified_at
@@ -1748,6 +1879,7 @@ $$;
 CREATE OR REPLACE FUNCTION pgmq.update_notify_insert(queue_name text, throttle_interval_ms integer)
     RETURNS void
     LANGUAGE plpgsql
+    SET search_path = pg_catalog, pg_temp
 AS
 $$
 BEGIN
@@ -1765,7 +1897,7 @@ BEGIN
 
     UPDATE pgmq.notify_insert_throttle
     SET throttle_interval_ms = update_notify_insert.throttle_interval_ms,
-        last_notified_at = to_timestamp(0)
+        last_notified_at = pg_catalog.to_timestamp(0)
     WHERE notify_insert_throttle.queue_name = update_notify_insert.queue_name;
 END;
 $$;
@@ -1774,6 +1906,7 @@ CREATE OR REPLACE FUNCTION pgmq.validate_routing_key(routing_key text)
     RETURNS boolean
     LANGUAGE plpgsql
     IMMUTABLE
+    SET search_path = pg_catalog, pg_temp
 AS
 $$
 BEGIN
@@ -1823,6 +1956,7 @@ CREATE OR REPLACE FUNCTION pgmq.validate_topic_pattern(pattern text)
     RETURNS boolean
     LANGUAGE plpgsql
     IMMUTABLE
+    SET search_path = pg_catalog, pg_temp
 AS
 $$
 BEGIN
@@ -1886,6 +2020,7 @@ $$;
 CREATE OR REPLACE FUNCTION pgmq.bind_topic(pattern text, queue_name text)
     RETURNS void
     LANGUAGE plpgsql
+    SET search_path = pg_catalog, pg_temp
 AS
 $$
 BEGIN
@@ -1907,6 +2042,7 @@ $$;
 CREATE OR REPLACE FUNCTION pgmq.unbind_topic(pattern text, queue_name text)
     RETURNS boolean
     LANGUAGE plpgsql
+    SET search_path = pg_catalog, pg_temp
 AS
 $$
 DECLARE
@@ -1944,6 +2080,7 @@ CREATE OR REPLACE FUNCTION pgmq.test_routing(routing_key text)
             )
     LANGUAGE plpgsql
     STABLE
+    SET search_path = pg_catalog, pg_temp
 AS
 $$
 BEGIN
@@ -1962,6 +2099,7 @@ CREATE OR REPLACE FUNCTION pgmq.send_topic(routing_key text, msg jsonb, headers 
     RETURNS integer
     LANGUAGE plpgsql
     VOLATILE
+    SET search_path = pg_catalog, pg_temp
 AS
 $$
 DECLARE
@@ -1998,10 +2136,11 @@ CREATE OR REPLACE FUNCTION pgmq.send_topic(routing_key text, msg jsonb)
     RETURNS integer
     LANGUAGE plpgsql
     VOLATILE
+    SET search_path = pg_catalog, pg_temp
 AS
 $$
 BEGIN
-    RETURN pgmq.send_topic(routing_key, msg, NULL, 0);
+    RETURN pgmq.send_topic(routing_key, msg, NULL::pg_catalog.jsonb, 0);
 END;
 $$;
 
@@ -2009,10 +2148,11 @@ CREATE OR REPLACE FUNCTION pgmq.send_topic(routing_key text, msg jsonb, delay in
     RETURNS integer
     LANGUAGE plpgsql
     VOLATILE
+    SET search_path = pg_catalog, pg_temp
 AS
 $$
 BEGIN
-    RETURN pgmq.send_topic(routing_key, msg, NULL, delay);
+    RETURN pgmq.send_topic(routing_key, msg, NULL::pg_catalog.jsonb, delay);
 END;
 $$;
 
@@ -2026,6 +2166,7 @@ CREATE OR REPLACE FUNCTION pgmq.list_topic_bindings()
             )
     LANGUAGE sql
     STABLE
+    SET search_path = pg_catalog, pg_temp
 AS
 $$
     SELECT pattern, queue_name, bound_at, compiled_regex
@@ -2043,6 +2184,7 @@ CREATE OR REPLACE FUNCTION pgmq.list_topic_bindings(queue_name text)
             )
     LANGUAGE sql
     STABLE
+    SET search_path = pg_catalog, pg_temp
 AS
 $$
     SELECT pattern, tb.queue_name, bound_at, compiled_regex
@@ -2061,6 +2203,7 @@ CREATE OR REPLACE FUNCTION pgmq.send_batch_topic(
     RETURNS TABLE(queue_name text, msg_id bigint)
     LANGUAGE plpgsql
     VOLATILE
+    SET search_path = pg_catalog, pg_temp
 AS
 $$
 DECLARE
@@ -2097,9 +2240,10 @@ CREATE OR REPLACE FUNCTION pgmq.send_batch_topic(
     RETURNS TABLE(queue_name text, msg_id bigint)
     LANGUAGE sql
     VOLATILE
+    SET search_path = pg_catalog, pg_temp
 AS
 $$
-    SELECT * FROM pgmq.send_batch_topic(routing_key, msgs, NULL, clock_timestamp());
+    SELECT * FROM pgmq.send_batch_topic(routing_key, msgs, NULL::pg_catalog.jsonb[], clock_timestamp());
 $$;
 
 -- send_batch_topic: 3 args with headers
@@ -2111,6 +2255,7 @@ CREATE OR REPLACE FUNCTION pgmq.send_batch_topic(
     RETURNS TABLE(queue_name text, msg_id bigint)
     LANGUAGE sql
     VOLATILE
+    SET search_path = pg_catalog, pg_temp
 AS
 $$
     SELECT * FROM pgmq.send_batch_topic(routing_key, msgs, headers, clock_timestamp());
@@ -2125,9 +2270,10 @@ CREATE OR REPLACE FUNCTION pgmq.send_batch_topic(
     RETURNS TABLE(queue_name text, msg_id bigint)
     LANGUAGE sql
     VOLATILE
+    SET search_path = pg_catalog, pg_temp
 AS
 $$
-    SELECT * FROM pgmq.send_batch_topic(routing_key, msgs, NULL, clock_timestamp() + make_interval(secs => delay));
+    SELECT * FROM pgmq.send_batch_topic(routing_key, msgs, NULL::pg_catalog.jsonb[], clock_timestamp() + pg_catalog.make_interval(secs => delay));
 $$;
 
 -- send_batch_topic: 3 args with timestamp delay
@@ -2139,9 +2285,10 @@ CREATE OR REPLACE FUNCTION pgmq.send_batch_topic(
     RETURNS TABLE(queue_name text, msg_id bigint)
     LANGUAGE sql
     VOLATILE
+    SET search_path = pg_catalog, pg_temp
 AS
 $$
-    SELECT * FROM pgmq.send_batch_topic(routing_key, msgs, NULL, delay);
+    SELECT * FROM pgmq.send_batch_topic(routing_key, msgs, NULL::pg_catalog.jsonb[], delay);
 $$;
 
 -- send_batch_topic: 4 args with integer delay
@@ -2154,7 +2301,24 @@ CREATE OR REPLACE FUNCTION pgmq.send_batch_topic(
     RETURNS TABLE(queue_name text, msg_id bigint)
     LANGUAGE sql
     VOLATILE
+    SET search_path = pg_catalog, pg_temp
 AS
 $$
-    SELECT * FROM pgmq.send_batch_topic(routing_key, msgs, headers, clock_timestamp() + make_interval(secs => delay));
+    SELECT * FROM pgmq.send_batch_topic(routing_key, msgs, headers, clock_timestamp() + pg_catalog.make_interval(secs => delay));
 $$;
+
+-- A direct statement-by-statement load restores its original session path.
+-- A load inside a transaction keeps the local setting until commit.
+DO $pgmq_restore_path$
+DECLARE
+    saved_path pg_catalog.text := pg_catalog.current_setting('pgmq.install_saved_search_path', true);
+BEGIN
+    IF pg_catalog.current_setting('pgmq.install_path_override', true)
+         OPERATOR(pg_catalog.=) '1'::pg_catalog.text
+       AND saved_path IS NOT NULL THEN
+        PERFORM pg_catalog.set_config('search_path', saved_path, false);
+        PERFORM pg_catalog.set_config('pgmq.install_saved_search_path', '', false);
+        PERFORM pg_catalog.set_config('pgmq.install_path_override', '0', false);
+    END IF;
+END
+$pgmq_restore_path$;

@@ -796,6 +796,28 @@ public class PgmqTemplate {
     }
 
     /**
+     * Create a partitioned queue with an explicit number of future partitions.
+     *
+     * @param queue the queue name
+     * @param partitionInterval the partition size as a numeric value or time interval
+     * @param retentionInterval the retention size as a numeric value or time interval
+     * @param premake the number of partitions to create in advance (at least one)
+     */
+    public void createPartitioned(@NonNull String queue, @NonNull String partitionInterval,
+                                  @NonNull String retentionInterval, int premake) {
+        validateQueueNameArgument(queue);
+        Assert.hasText(partitionInterval, "Partition interval must not be empty");
+        Assert.hasText(retentionInterval, "Retention interval must not be empty");
+        Assert.isTrue(premake > 0, "Premake must be greater than 0");
+        if (!Boolean.TRUE.equals(isPartmanInstalled())) {
+            throw new PgmqException("pg_partman extension is required for partitioned queues");
+        }
+
+        String sql = "select pgmq.create_partitioned(?, ?, ?, ?)";
+        jdbcTemplate.queryForObject(sql, Object.class, queue, partitionInterval, retentionInterval, premake);
+    }
+
+    /**
      * Create a partitioned queue with default partition and retention settings.
      *
      * @param queue the queue name
@@ -1515,7 +1537,8 @@ public class PgmqTemplate {
                     rs.getObject("oldest_msg_age_sec", Integer.class),
                     rs.getLong("total_messages"),
                     rs.getObject("scrape_time", OffsetDateTime.class),
-                    rs.getLong("queue_visible_length")
+                    rs.getLong("queue_visible_length"),
+                    rs.getObject("default_partition_length", Long.class)
             );
         }
     }

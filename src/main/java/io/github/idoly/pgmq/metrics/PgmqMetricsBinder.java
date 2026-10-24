@@ -224,6 +224,7 @@ public class PgmqMetricsBinder implements MeterBinder, SmartLifecycle {
             MultiGauge newestMsgAgeSec,
             MultiGauge oldestMsgAgeSec,
             MultiGauge totalMessages,
+            MultiGauge defaultPartitionLength,
             MultiGauge notifyThrottleIntervalMs,
             MultiGauge notifyLastNotifiedAtEpochSeconds
     ) {
@@ -242,6 +243,8 @@ public class PgmqMetricsBinder implements MeterBinder, SmartLifecycle {
                             "Age of the oldest message in the queue in seconds"),
                     multiGauge(registry, "pgmq.queue.total_messages",
                             "Total number of messages that have ever been in the queue"),
+                    multiGauge(registry, "pgmq.queue.default_partition_length",
+                            "Estimated messages in queue and archive default partitions"),
                     multiGauge(registry, "pgmq.notify_insert.throttle_interval_ms",
                             "Minimum milliseconds between insert notifications"),
                     multiGauge(registry, "pgmq.notify_insert.last_notified_at_epoch_seconds",
@@ -258,6 +261,7 @@ public class PgmqMetricsBinder implements MeterBinder, SmartLifecycle {
             newestMsgAgeSec.register(metricRows(queueMetrics, PgmqMetrics::newestMsgAgeSec), true);
             oldestMsgAgeSec.register(metricRows(queueMetrics, PgmqMetrics::oldestMsgAgeSec), true);
             totalMessages.register(metricRows(queueMetrics, PgmqMetrics::totalMessages), true);
+            defaultPartitionLength.register(metricRows(queueMetrics, PgmqMetrics::defaultPartitionLength), true);
             notifyThrottleIntervalMs.register(throttleRows(throttles, NotifyInsertThrottle::throttleIntervalMs), true);
             notifyLastNotifiedAtEpochSeconds.register(throttleRows(throttles,
                     PgmqMetricsBinder::lastNotifiedAtEpochSecond), true);

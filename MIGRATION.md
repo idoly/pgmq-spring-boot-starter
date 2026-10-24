@@ -1,7 +1,34 @@
 # Migration Guide
 
-This guide covers migration from the legacy `core` API to `2.1-1.11.2`. The current release
+This guide covers migration from the legacy `core` API to `2.1-1.13.1`. The current release
 intentionally removes backward compatibility.
+
+## Upgrade PGMQ to 1.13.1
+
+Version `2.1-1.13.1` bundles the upstream PGMQ `1.13.1` SQL script. Existing Java template
+calls remain supported; `createPartitioned` also accepts an explicit `premake` value, and
+`PgmqMetrics` adds nullable `defaultPartitionLength`. The seven-argument metrics constructor
+remains available for existing callers. Recompile applications using the metrics record.
+
+For extension-managed databases, install the PGMQ `1.13.1` extension files on the server and
+run the following through your database migration process:
+
+```sql
+ALTER EXTENSION pgmq UPDATE TO '1.13.1';
+```
+
+For databases initialized from bundled SQL, apply the upstream SQL upgrade path through your
+migration process, adapting extension-specific statements for the schema installation. Do not
+re-run the fresh-install `sql/pgmq.sql` against an existing schema. The initializer detects the
+existing schema and skips it; setting `pgmq.auto-init=true` does not upgrade it. The previous
+starter labels its SQL `1.11.2`; verify the actual installed function definitions when choosing
+the upstream migration starting point.
+
+PGMQ `1.13.1` pins trusted function search paths and narrows `pg_monitor` privileges to queue
+metadata and the columns needed for queue metrics. Review upstream upgrade warnings about
+revoking old broad grants. Roles using `pg_monitor` to read message payloads or notification
+throttles need explicit application-specific grants. Re-enable insert notifications on existing
+queues with mixed-case names so their triggers receive the original queue name.
 
 ## Upgrade from 2.0-1.11.2
 
@@ -328,8 +355,8 @@ The Micrometer binder exports notification gauges for enabled notification throt
 
 ## 12. Review SQL Initialization
 
-`PgmqInitializer` expects PGMQ `1.11.2`. For PostgreSQL extension-managed installs, the initializer
-logs a warning when the installed extension version differs from `1.11.2`. Update the extension
+`PgmqInitializer` expects PGMQ `1.13.1`. For PostgreSQL extension-managed installs, the initializer
+logs a warning when the installed extension version differs from `1.13.1`. Update the extension
 outside the starter when you need the exact supported SQL surface.
 
 For bundled SQL installs, the starter does not create version metadata in the `pgmq` schema.

@@ -74,7 +74,7 @@ class PgmqInitializerTest {
 
         private boolean pgmqInstalled;
 
-        private String extensionVersion = "1.11.2";
+        private String extensionVersion = "1.13.1";
 
         private boolean bundledSchemaInstalled = true;
 

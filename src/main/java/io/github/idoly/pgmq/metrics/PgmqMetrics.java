@@ -14,6 +14,8 @@ import java.time.OffsetDateTime;
  * @param totalMessages the total number of messages ever enqueued in the queue
  * @param scrapeTime the timestamp when these metrics were collected
  * @param queueVisibleLength the number of messages currently visible in the queue
+ * @param defaultPartitionLength estimated messages in queue and archive default partitions,
+ *                               or {@code null} for a non-partitioned queue
  */
 public record PgmqMetrics(
         String queueName,
@@ -22,5 +24,24 @@ public record PgmqMetrics(
         Integer oldestMsgAgeSec,
         Long totalMessages,
         OffsetDateTime scrapeTime,
-        Long queueVisibleLength
-) {}
+        Long queueVisibleLength,
+        Long defaultPartitionLength
+) {
+    /**
+     * Construct metrics without a default-partition estimate.
+     *
+     * @param queueName the queue name
+     * @param queueLength current queue length
+     * @param newestMsgAgeSec newest message age in seconds
+     * @param oldestMsgAgeSec oldest message age in seconds
+     * @param totalMessages total messages ever enqueued
+     * @param scrapeTime collection timestamp
+     * @param queueVisibleLength visible queue length
+     */
+    public PgmqMetrics(String queueName, Long queueLength, Integer newestMsgAgeSec,
+                       Integer oldestMsgAgeSec, Long totalMessages, OffsetDateTime scrapeTime,
+                       Long queueVisibleLength) {
+        this(queueName, queueLength, newestMsgAgeSec, oldestMsgAgeSec, totalMessages,
+                scrapeTime, queueVisibleLength, null);
+    }
+}

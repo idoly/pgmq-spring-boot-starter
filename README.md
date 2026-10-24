@@ -14,7 +14,7 @@ This release uses the current package layout and is not source-compatible with t
 <dependency>
     <groupId>io.github.idoly</groupId>
     <artifactId>pgmq-spring-boot-starter</artifactId>
-    <version>2.1-1.11.2</version>
+    <version>2.1-1.13.1</version>
 </dependency>
 ```
 
@@ -83,12 +83,14 @@ consumer concurrency, poll concurrency, max in-flight, and poll interval default
 Set `pgmq.auto-init=true` when the application should initialize PGMQ at startup.
 
 If PostgreSQL reports the `pgmq` extension as available, the initializer creates the extension
-when needed and warns when the installed extension version differs from `1.11.2`.
+when needed and warns when the installed extension version differs from `1.13.1`.
 
 If the extension is not available, the initializer executes the configured bundled SQL script only
 when the `pgmq` schema is not already installed. Bundled SQL installs do not create starter-owned
 version metadata, and this starter now ships a single `sql/pgmq.sql` script rather than incremental
-PGMQ upgrade scripts.
+PGMQ upgrade scripts. The bundled script is taken from [PGMQ v1.13.1](https://github.com/pgmq/pgmq/blob/v1.13.1/pgmq-extension/sql/pgmq.sql).
+Existing databases require an explicit database migration; upgrading the starter does not update
+an installed extension or an existing bundled schema. See [MIGRATION.md](MIGRATION.md#upgrade-pgmq-to-1131).
 
 Auto-initialization is coordinated by the queue declarer, so it runs once before queue declarations
 and also runs when no `PgmqQueue` beans are declared.
@@ -166,6 +168,7 @@ Common queue and message operations:
 pgmqTemplate.create("orders");
 pgmqTemplate.createUnlogged("audit");
 pgmqTemplate.createPartitioned("events");
+pgmqTemplate.createPartitioned("events_custom", "10000", "100000", 8); // premake future partitions
 
 List<PgmqMessage> popped = pgmqTemplate.pop("orders", 5);
 pgmqTemplate.setVt("orders", msgId, 60);
@@ -336,6 +339,10 @@ The no-argument throttle overload uses PGMQ's default `250` millisecond throttle
 
 ## Micrometer Metrics
 
+The `default_partition_length` gauge estimates messages in the queue and archive default partitions.
+It is `NaN` for non-partitioned queues; a positive estimate indicates that partition maintenance
+needs attention. PostgreSQL statistics must be current for the estimate to reflect a spill.
+
 The auto-configuration registers `PgmqMetricsBinder` for database queue/notification gauges and
 `PgmqListenerMetrics` for listener execution metrics. Database gauges refresh every 30 seconds by
 default; listener counters, timers, and state gauges update from the listener hot path.
@@ -346,6 +353,7 @@ pgmq.queue.visible_length
 pgmq.queue.newest_msg_age_sec
 pgmq.queue.oldest_msg_age_sec
 pgmq.queue.total_messages
+pgmq.queue.default_partition_length
 pgmq.notify_insert.throttle_interval_ms
 pgmq.notify_insert.last_notified_at_epoch_seconds
 pgmq.listener.running

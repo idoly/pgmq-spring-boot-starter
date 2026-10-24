@@ -48,6 +48,8 @@ class PgmqMetricsBinderTest {
         Gauge lastNotified = gauge(registry, "pgmq.notify_insert.last_notified_at_epoch_seconds", "jobs");
 
         assertEquals(2.0, queueLength.value());
+        assertEquals(3.0, gauge(registry, "pgmq.queue.default_partition_length", "jobs").value());
+        assertTrue(Double.isNaN(gauge(registry, "pgmq.queue.default_partition_length", "plain").value()));
         assertTrue(Double.isNaN(newestAge.value()));
         assertEquals(250.0, throttle.value());
         assertEquals(OffsetDateTime.parse("2026-07-04T00:00:00Z").toEpochSecond(), lastNotified.value());
@@ -79,8 +81,10 @@ class PgmqMetricsBinderTest {
                     7,
                     5L,
                     OffsetDateTime.parse("2026-07-04T00:00:00Z"),
-                    1L
-            ));
+                    1L,
+                    3L
+            ), new PgmqMetrics("plain", 0L, null, null, 0L,
+                    OffsetDateTime.parse("2026-07-04T00:00:00Z"), 0L));
         }
 
         @Override

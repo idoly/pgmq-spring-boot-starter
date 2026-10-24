@@ -204,6 +204,7 @@ class PgmqTemplateTest extends PostgresPartmanContainerSupport {
         assertNotNull(metrics);
         assertNull(metrics.newestMsgAgeSec());
         assertNull(metrics.oldestMsgAgeSec());
+        assertNull(metrics.defaultPartitionLength());
 
         List<PgmqMetrics> allMetrics = pgmqTemplate.getMetricsAll();
         assertTrue(allMetrics.stream().anyMatch(m -> m.queueName().equals(TEST_QUEUE)));
@@ -223,6 +224,47 @@ class PgmqTemplateTest extends PostgresPartmanContainerSupport {
         pgmqTemplate.disableNotifyInsert(TEST_QUEUE);
         assertTrue(pgmqTemplate.listNotifyInsertThrottles().stream()
                 .noneMatch(throttle -> throttle.queueName().equals(TEST_QUEUE)));
+    }
+
+    @Test
+    void testMonitorCanReadMetricsWithoutMessagePayloads() {
+        pgmqTemplate.send(TEST_QUEUE, "private-payload");
+        var jdbc = pgmqTemplate.getJdbcTemplate();
+        assertFalse(Boolean.TRUE.equals(jdbc.queryForObject(
+                "select has_column_privilege('pg_monitor', 'pgmq.q_test_queue', 'message', 'SELECT')",
+                Boolean.class)));
+        assertFalse(Boolean.TRUE.equals(jdbc.queryForObject(
+                "select has_column_privilege('pg_monitor', 'pgmq.q_test_queue', 'headers', 'SELECT')",
+                Boolean.class)));
+        assertFalse(Boolean.TRUE.equals(jdbc.queryForObject(
+                "select has_table_privilege('pg_monitor', 'pgmq.a_test_queue', 'SELECT')",
+                Boolean.class)));
+        jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+            try (var statement = connection.createStatement()) {
+                statement.execute("set role pg_monitor");
+                try (var result = statement.executeQuery("select queue_length from pgmq.metrics('test_queue')")) {
+                    assertTrue(result.next());
+                    assertEquals(1L, result.getLong(1));
+                } finally {
+                    statement.execute("reset role");
+                }
+            }
+            return null;
+        });
+    }
+
+    @Test
+    void testMixedCaseQueueInsertUpdatesNotificationTimestamp() {
+        String queue = "MixedCaseNotify";
+        try {
+            pgmqTemplate.create(queue);
+            pgmqTemplate.enableNotifyInsert(queue, 0);
+            OffsetDateTime before = notifyThrottle(queue).lastNotifiedAt();
+            pgmqTemplate.send(queue, "notify");
+            assertTrue(notifyThrottle(queue).lastNotifiedAt().isAfter(before));
+        } finally {
+            pgmqTemplate.dropQueue(queue);
+        }
     }
 
     @Test
@@ -342,8 +384,13 @@ class PgmqTemplateTest extends PostgresPartmanContainerSupport {
         pgmqTemplate.dropQueue(queue);
 
         try {
-            pgmqTemplate.createPartitioned(queue);
+            pgmqTemplate.createPartitioned(queue, "10000", "100000", 2);
             pgmqTemplate.createFifoIndexesAll();
+            assertNotNull(pgmqTemplate.getMetrics(queue).defaultPartitionLength());
+            assertEquals(2, pgmqTemplate.getJdbcTemplate().queryForObject(
+                    "select premake from part_config where parent_table = ?", Integer.class, "pgmq.q_" + queue));
+            long msgId = pgmqTemplate.send(queue, "partitioned");
+            assertEquals(msgId, pgmqTemplate.read(queue, 10, 1).get(0).msgId());
 
             List<PgmqQueue> queues = pgmqTemplate.listQueues();
             assertTrue(queues.stream().anyMatch(q -> q.queueName().equals(queue)

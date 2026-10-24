@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.1-1.13.1
+
+### Changed
+
+- Updated bundled SQL and the expected extension version to upstream PGMQ `1.13.1`.
+- Included upstream search-path hardening, restricted `pg_monitor` grants, mixed-case insert
+  notification fixes, and partition creation fixes.
+- Documented explicit database upgrades; existing extensions and bundled schemas are not
+  automatically migrated by the starter.
+
+### Added
+
+- Added a `createPartitioned` overload accepting PGMQ's `premake` setting.
+- Exposed the nullable `defaultPartitionLength` metric and the Micrometer
+  `pgmq.queue.default_partition_length` gauge. Retained the seven-argument metrics constructor.
+
 ## 2.1-1.11.2
 
 ### Added

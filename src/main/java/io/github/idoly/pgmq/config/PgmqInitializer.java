@@ -23,7 +23,7 @@ import io.github.idoly.pgmq.PgmqException;
 public class PgmqInitializer {
 
     /** PGMQ version this starter is built against. */
-    private static final String PGMQ_VERSION = "1.11.2";
+    private static final String PGMQ_VERSION = "1.13.1";
 
     /** Logger used for version mismatch warnings. */
     private static final Log logger = LogFactory.getLog(PgmqInitializer.class);
