@@ -1,7 +1,5 @@
 package io.github.idoly.pgmq.listener.container;
 
-import java.util.concurrent.atomic.AtomicBoolean;
-
 import org.springframework.util.Assert;
 
 import io.github.idoly.pgmq.listener.PgmqAcknowledgment;
@@ -21,8 +19,8 @@ final class DefaultPgmqAcknowledgment implements PgmqAcknowledgment {
     /** Message id being acknowledged. */
     private final long msgId;
 
-    /** Guards the handle so only one completion action is applied. */
-    private final AtomicBoolean completed = new AtomicBoolean(false);
+    /** Published only after the database completion action returns successfully. */
+    private volatile boolean completed;
 
     /**
      * Create an acknowledgement handle for one queue message.
@@ -44,9 +42,10 @@ final class DefaultPgmqAcknowledgment implements PgmqAcknowledgment {
      * Archive the message if no completion action has already run.
      */
     @Override
-    public void acknowledge() {
-        if (completed.compareAndSet(false, true)) {
+    public synchronized void acknowledge() {
+        if (!completed) {
             pgmqTemplate.archive(queue, msgId);
+            completed = true;
         }
     }
 
@@ -54,9 +53,10 @@ final class DefaultPgmqAcknowledgment implements PgmqAcknowledgment {
      * Delete the message if no completion action has already run.
      */
     @Override
-    public void delete() {
-        if (completed.compareAndSet(false, true)) {
+    public synchronized void delete() {
+        if (!completed) {
             pgmqTemplate.delete(queue, msgId);
+            completed = true;
         }
     }
 
@@ -64,9 +64,10 @@ final class DefaultPgmqAcknowledgment implements PgmqAcknowledgment {
      * Requeue the message after the given visibility timeout if no completion action has already run.
      */
     @Override
-    public void requeueAfter(int visibilityTimeoutSeconds) {
-        if (completed.compareAndSet(false, true)) {
+    public synchronized void requeueAfter(int visibilityTimeoutSeconds) {
+        if (!completed) {
             pgmqTemplate.setVt(queue, msgId, visibilityTimeoutSeconds);
+            completed = true;
         }
     }
 
@@ -75,6 +76,6 @@ final class DefaultPgmqAcknowledgment implements PgmqAcknowledgment {
      */
     @Override
     public boolean isCompleted() {
-        return completed.get();
+        return completed;
     }
 }

@@ -1,7 +1,10 @@
 package io.github.idoly.pgmq.listener.container;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.*;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -38,6 +41,58 @@ class DefaultPgmqAcknowledgmentTest {
 
         assertTrue(acknowledgment.isCompleted());
         assertEquals(List.of("setVt:queue:2:15"), template.actions);
+    }
+
+    @Test
+    void failedDatabaseActionsCanBeRetried() {
+        for (var action : List.<java.util.function.Consumer<DefaultPgmqAcknowledgment>>of(
+                DefaultPgmqAcknowledgment::acknowledge,
+                DefaultPgmqAcknowledgment::delete,
+                acknowledgment -> acknowledgment.requeueAfter(15))) {
+            PgmqTemplate template = mock(PgmqTemplate.class);
+            when(template.archive("queue", 1L)).thenThrow(new IllegalStateException("database unavailable"))
+                    .thenReturn(true);
+            when(template.delete("queue", 1L)).thenThrow(new IllegalStateException("database unavailable"))
+                    .thenReturn(true);
+            when(template.setVt("queue", 1L, 15)).thenThrow(new IllegalStateException("database unavailable"))
+                    .thenReturn(null);
+            var acknowledgment = new DefaultPgmqAcknowledgment(template, "queue", 1L);
+
+            assertThrows(IllegalStateException.class, () -> action.accept(acknowledgment));
+            assertFalse(acknowledgment.isCompleted());
+            action.accept(acknowledgment);
+            assertTrue(acknowledgment.isCompleted());
+        }
+    }
+
+    @Test
+    void concurrentCompletionWaitsForSuccessfulDatabaseAction() throws Exception {
+        PgmqTemplate template = mock(PgmqTemplate.class);
+        var databaseStarted = new java.util.concurrent.CountDownLatch(1);
+        var releaseDatabase = new java.util.concurrent.CountDownLatch(1);
+        when(template.archive("queue", 1L)).thenAnswer(invocation -> {
+            databaseStarted.countDown();
+            assertTrue(releaseDatabase.await(2, java.util.concurrent.TimeUnit.SECONDS));
+            return true;
+        });
+        var acknowledgment = new DefaultPgmqAcknowledgment(template, "queue", 1L);
+        var executor = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            var archive = executor.submit(acknowledgment::acknowledge);
+            assertTrue(databaseStarted.await(2, java.util.concurrent.TimeUnit.SECONDS));
+            assertFalse(acknowledgment.isCompleted(), "completion must wait for the database result");
+            var delete = executor.submit(acknowledgment::delete);
+            releaseDatabase.countDown();
+            archive.get(2, java.util.concurrent.TimeUnit.SECONDS);
+            delete.get(2, java.util.concurrent.TimeUnit.SECONDS);
+            assertTrue(acknowledgment.isCompleted());
+            verify(template, times(1)).archive("queue", 1L);
+            verify(template, never()).delete("queue", 1L);
+        } finally {
+            releaseDatabase.countDown();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(2, java.util.concurrent.TimeUnit.SECONDS));
+        }
     }
 
     private static class TrackingTemplate extends PgmqTemplate {

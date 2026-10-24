@@ -7,6 +7,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -85,6 +86,17 @@ public class PgmqAutoConfiguration {
     @ConditionalOnProperty(prefix = "pgmq.listener", name = "enabled", havingValue = "true", matchIfMissing = true)
     public PgmqListenerEndpointRegistry pgmqListenerEndpointRegistry() {
         return new PgmqListenerEndpointRegistry();
+    }
+
+    /**
+     * Reports startup connection budgets for listener data sources with a known pool size.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "pgmq.listener", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public PgmqConnectionPoolDiagnostics pgmqConnectionPoolDiagnostics(PgmqListenerEndpointRegistry registry,
+            ApplicationContext applicationContext) {
+        return new PgmqConnectionPoolDiagnostics(registry, applicationContext);
     }
 
     /**

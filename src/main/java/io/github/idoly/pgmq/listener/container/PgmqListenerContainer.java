@@ -2,10 +2,11 @@ package io.github.idoly.pgmq.listener.container;
 
 import java.util.List;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+
+import javax.sql.DataSource;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -30,7 +31,7 @@ public class PgmqListenerContainer implements SmartLifecycle {
 
     private static final Log logger = LogFactory.getLog(PgmqListenerContainer.class);
 
-    private final AtomicBoolean running = new AtomicBoolean(false);
+    private volatile RunState currentRun;
 
     private final PgmqTemplate pgmqTemplate;
 
@@ -44,11 +45,17 @@ public class PgmqListenerContainer implements SmartLifecycle {
 
     private final PgmqListenerMetrics listenerMetrics;
 
-    private ExecutorService pollExecutor;
+    /** Resources belong to one start/stop cycle, including tasks that outlive stop. */
+    private static final class RunState {
+        private final AtomicBoolean active = new AtomicBoolean(true);
+        private final Semaphore permits;
+        private ExecutorService pollExecutor;
+        private ExecutorService consumerExecutor;
 
-    private ExecutorService consumerExecutor;
-
-    private Semaphore inFlightPermits;
+        private RunState(int maxInFlight) {
+            permits = new Semaphore(maxInFlight, true);
+        }
+    }
 
     /**
      * Create a container with explicit execution and metric infrastructure.
@@ -105,6 +112,15 @@ public class PgmqListenerContainer implements SmartLifecycle {
     }
 
     /**
+     * Return the data source used by this listener's polling and acknowledgement calls.
+     *
+     * @return configured data source, or {@code null} for an unconfigured template
+     */
+    public DataSource getDataSource() {
+        return pgmqTemplate.getJdbcTemplate().getDataSource();
+    }
+
+    /**
      * Return the resolved options used by this container.
      *
      * @return listener container options
@@ -119,8 +135,8 @@ public class PgmqListenerContainer implements SmartLifecycle {
      * @return in-flight message count
      */
     public int getInFlightCount() {
-        Semaphore current = inFlightPermits;
-        return current == null ? 0 : listenerOptions.maxInFlight() - current.availablePermits();
+        RunState run = currentRun;
+        return run == null ? 0 : listenerOptions.maxInFlight() - run.permits.availablePermits();
     }
 
     /**
@@ -128,37 +144,40 @@ public class PgmqListenerContainer implements SmartLifecycle {
      */
     @Override
     public synchronized void start() {
-        if (!running.compareAndSet(false, true)) {
+        if (isRunning()) {
             return;
         }
 
         logger.info("starting PgmqListenerContainer " + listenerOptions.id() + " for queue " + listenerOptions.queue());
-        inFlightPermits = new Semaphore(listenerOptions.maxInFlight(), true);
+        RunState run = new RunState(listenerOptions.maxInFlight());
+        currentRun = run;
         try {
-            consumerExecutor = executorFactory.createConsumerExecutor(listenerOptions);
-            pollExecutor = executorFactory.createPollExecutor(listenerOptions);
-            Assert.state(consumerExecutor != null, "Consumer executor must not be null");
-            Assert.state(pollExecutor != null, "Poll executor must not be null");
+            run.consumerExecutor = executorFactory.createConsumerExecutor(listenerOptions);
+            run.pollExecutor = executorFactory.createPollExecutor(listenerOptions);
+            Assert.state(run.consumerExecutor != null, "Consumer executor must not be null");
+            Assert.state(run.pollExecutor != null, "Poll executor must not be null");
             for (int i = 0; i < listenerOptions.pollConcurrency(); i++) {
-                pollExecutor.submit(this::pollLoop);
+                run.pollExecutor.submit(() -> pollLoop(run));
             }
         } catch (RuntimeException error) {
-            running.set(false);
-            shutdownNow(pollExecutor);
-            shutdownNow(consumerExecutor);
-            pollExecutor = null;
-            consumerExecutor = null;
+            run.active.set(false);
+            shutdownNow(run.pollExecutor);
+            shutdownNow(run.consumerExecutor);
+            currentRun = null;
             throw error;
         }
     }
 
-    private void pollLoop() {
-        while (running.get() && !Thread.currentThread().isInterrupted()) {
+    private void pollLoop(RunState run) {
+        while (run.active.get() && !Thread.currentThread().isInterrupted()) {
             int reservedPermits = 0;
             long pollStartedNanos = 0;
             boolean pollMetricRecorded = false;
             try {
-                reservedPermits = reserveCapacity();
+                reservedPermits = reserveCapacity(run);
+                if (!run.active.get()) {
+                    break;
+                }
                 pollStartedNanos = System.nanoTime();
                 List<PgmqMessage> messages = readMessages(reservedPermits);
                 listenerMetrics.recordPoll(listenerOptions.id(), listenerOptions.queue(),
@@ -169,11 +188,14 @@ public class PgmqListenerContainer implements SmartLifecycle {
                 }
 
                 int unusedPermits = reservedPermits - messages.size();
-                releaseCapacity(unusedPermits);
+                releaseCapacity(run, unusedPermits);
                 reservedPermits -= unusedPermits;
 
                 for (PgmqMessage message : messages) {
-                    submit(message);
+                    if (!run.active.get()) {
+                        break;
+                    }
+                    run.consumerExecutor.execute(() -> process(run, message));
                     reservedPermits--;
                 }
             } catch (InterruptedException error) {
@@ -183,18 +205,18 @@ public class PgmqListenerContainer implements SmartLifecycle {
                     listenerMetrics.recordPoll(listenerOptions.id(), listenerOptions.queue(),
                             System.nanoTime() - pollStartedNanos, "error");
                 }
-                if (running.get()) {
+                if (run.active.get()) {
                     logger.error("failed to poll PGMQ listener " + listenerOptions.id(), error);
                     pauseAfterFailure();
                 }
             } finally {
-                releaseCapacity(reservedPermits);
+                releaseCapacity(run, reservedPermits);
             }
         }
     }
 
-    private int reserveCapacity() throws InterruptedException {
-        Semaphore current = inFlightPermits;
+    private int reserveCapacity(RunState run) throws InterruptedException {
+        Semaphore current = run.permits;
         current.acquire();
         int reservedPermits = 1;
         int permitsPerPoller = (listenerOptions.maxInFlight() + listenerOptions.pollConcurrency() - 1)
@@ -223,23 +245,15 @@ public class PgmqListenerContainer implements SmartLifecycle {
         };
     }
 
-    private void submit(PgmqMessage message) {
-        ExecutorService current = consumerExecutor;
-        if (current == null) {
-            throw new RejectedExecutionException("PGMQ consumer executor is not available");
-        }
-        current.execute(() -> process(message));
-    }
-
-    private void process(PgmqMessage message) {
+    private void process(RunState run, PgmqMessage message) {
         long processingStartedNanos = System.nanoTime();
         String metricResult = "error";
         DefaultPgmqAcknowledgment acknowledgment =
                 new DefaultPgmqAcknowledgment(pgmqTemplate, listenerOptions.queue(), message.msgId());
         try {
             messageListener.onMessage(message, acknowledgment);
-            if (listenerOptions.ackMode() == AckMode.AUTO && !acknowledgment.isCompleted()) {
-                pgmqTemplate.archive(listenerOptions.queue(), message.msgId());
+            if (listenerOptions.ackMode() == AckMode.AUTO) {
+                acknowledgment.acknowledge();
             }
             metricResult = "success";
         } catch (Throwable error) {
@@ -250,14 +264,14 @@ public class PgmqListenerContainer implements SmartLifecycle {
                 listenerMetrics.recordProcessing(listenerOptions.id(), listenerOptions.queue(),
                         System.nanoTime() - processingStartedNanos, metricResult);
             } finally {
-                releaseCapacity(1);
+                releaseCapacity(run, 1);
             }
         }
     }
 
-    private void releaseCapacity(int permits) {
+    private void releaseCapacity(RunState run, int permits) {
         if (permits > 0) {
-            inFlightPermits.release(permits);
+            run.permits.release(permits);
         }
     }
 
@@ -286,13 +300,14 @@ public class PgmqListenerContainer implements SmartLifecycle {
      */
     @Override
     public synchronized void stop() {
-        if (!running.compareAndSet(true, false)) {
+        RunState run = currentRun;
+        if (run == null || !run.active.compareAndSet(true, false)) {
             return;
         }
 
         logger.info("stopping PgmqListenerContainer " + listenerOptions.id() + " for queue " + listenerOptions.queue());
-        ExecutorService currentPollExecutor = pollExecutor;
-        ExecutorService currentConsumerExecutor = consumerExecutor;
+        ExecutorService currentPollExecutor = run.pollExecutor;
+        ExecutorService currentConsumerExecutor = run.consumerExecutor;
 
         shutdownNow(currentPollExecutor);
         awaitTermination(currentPollExecutor, "pollers");
@@ -304,9 +319,7 @@ public class PgmqListenerContainer implements SmartLifecycle {
             }
         }
 
-        pollExecutor = null;
-        consumerExecutor = null;
-        inFlightPermits = null;
+        currentRun = null;
     }
 
     private void shutdownNow(ExecutorService executor) {
@@ -351,7 +364,8 @@ public class PgmqListenerContainer implements SmartLifecycle {
      */
     @Override
     public boolean isRunning() {
-        return running.get();
+        RunState run = currentRun;
+        return run != null && run.active.get();
     }
 
     /**

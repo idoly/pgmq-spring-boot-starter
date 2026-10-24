@@ -39,6 +39,7 @@ class PgmqAutoConfigurationTest {
                     assertThat(context).hasSingleBean(PgmqListenerMetrics.class);
                     assertThat(context).hasSingleBean(PgmqQueueDeclarer.class);
                     assertThat(context).hasSingleBean(PgmqListenerEndpointRegistry.class);
+                    assertThat(context).hasSingleBean(PgmqConnectionPoolDiagnostics.class);
                     assertThat(context).hasSingleBean(PgmqErrorHandler.class);
                     assertThat(context).hasSingleBean(PgmqListenerExecutorFactory.class);
                     assertThat(context).hasSingleBean(PgmqListenerAnnotationBeanPostProcessor.class);
@@ -55,6 +56,7 @@ class PgmqAutoConfigurationTest {
                 .run(context -> {
                     assertThat(context).hasSingleBean(PgmqTemplate.class);
                     assertThat(context).doesNotHaveBean(PgmqListenerEndpointRegistry.class);
+                    assertThat(context).doesNotHaveBean(PgmqConnectionPoolDiagnostics.class);
                     assertThat(context).doesNotHaveBean(PgmqErrorHandler.class);
                     assertThat(context).doesNotHaveBean(PgmqListenerExecutorFactory.class);
                     assertThat(context).doesNotHaveBean(PgmqListenerMetrics.class);

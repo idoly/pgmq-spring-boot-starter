@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Isolated listener execution resources per start/stop cycle so late tasks cannot release
+  capacity or dispatch messages into a restarted container.
+- Kept acknowledgement handles incomplete when completion SQL throws, allowing another attempt;
+  serialized concurrent completion calls and reused the same completion logic for automatic ACK.
+
+### Added
+
+- Added startup connection-budget diagnostics grouped by listener data source, including HikariCP
+  pools behind Spring data source wrappers. Diagnostics report capacity without opening connections.
+- Added listener configuration examples covering connection budgets, slow tasks, multiple queues,
+  transactional acknowledgement and shutdown behavior.
+
 ## 2.1-1.13.1
 
 ### Changed

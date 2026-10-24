@@ -265,6 +265,15 @@ can be up to twice the configured value. Applications may provide a `PgmqListene
 bean to create custom platform-thread or Java 21 virtual-thread consumer executors. Returned
 executors must be dedicated to one container because the container owns their shutdown lifecycle.
 
+Startup diagnostics report the long-poll connection budget for running listeners on pools exposing
+`maximumPoolSize`, including HikariCP, and warn when it can occupy the entire pool. Diagnostics
+never resize the pool or borrow a connection. See [listener configuration and operation](docs/listener-tuning.md)
+for low-latency, slow-task and multi-queue examples, transaction usage and shutdown limits.
+
+Each start/stop cycle owns its execution capacity. Tasks that finish after a stop timeout cannot
+release permits into a restarted container. Completion handles become completed only after the
+completion SQL returns successfully; a database exception leaves the handle available for retry.
+
 ## FIFO Reads
 
 FIFO helpers group messages by the `x-pgmq-group` header. Messages without that header use the

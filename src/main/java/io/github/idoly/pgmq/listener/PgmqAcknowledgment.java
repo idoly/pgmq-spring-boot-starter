@@ -3,8 +3,11 @@ package io.github.idoly.pgmq.listener;
 /**
  * Manual completion handle exposed to listener methods.
  *
- * <p>Methods are idempotent for a single message: the first completion action
- * wins and later calls are ignored by the default implementation.</p>
+ * <p>Methods are idempotent for a single message: the first successfully returned completion
+ * action wins and later calls are ignored by the default implementation. Concurrent completion
+ * calls are serialized. A database exception leaves the handle incomplete so callers can retry.
+ * A failed connection may leave the database outcome unknown; retrying does not provide
+ * exactly-once processing.</p>
  */
 public interface PgmqAcknowledgment {
 
