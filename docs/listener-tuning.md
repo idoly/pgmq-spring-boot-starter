@@ -164,7 +164,9 @@ mvn '-Dtest=PgmqJdbcLifecycleIntegrationTest' test
 Without `PGMQ_TEST_JDBC_URL`, this test class is skipped. It checks zero-duration reads, empty-poll
 spacing, two listeners sharing two connections, acquisition timeout, slow-query cancellation,
 shutdown bounds, and Spring transactional rollback of business work together with manual ACK.
-The existing Testcontainers suite continues to cover pg_partman-dependent operations.
+It also exercises transaction-level queue locks, batch validation and shared headers, FIFO index
+creation and deprecated compatibility functions. The existing Testcontainers suite continues to
+cover pg_partman-dependent operations.
 
 ## Measure before tuning
 

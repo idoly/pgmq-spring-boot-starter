@@ -19,6 +19,15 @@
 
 ### Added
 
+- Completed the template API for the public entry points in bundled PGMQ 1.13.1 SQL, including
+  transaction locks, table naming and default-argument overloads. Upstream underscore-prefixed
+  helpers remain SQL implementation details; notifications use trigger registration.
+- Added shared-header batch-send overloads for integer delays and absolute timestamps, and made
+  omitted read, polling and pop arguments use the SQL function defaults.
+- Restored deprecated `detachArchive` and `dropQueue(queue, partitioned)` wrappers with their actual
+  upstream behavior: archive detach is a no-op and the legacy drop overload always returns true.
+- Added the SQL-to-Java API mapping and real PostgreSQL checks for transaction lock scope, batch
+  validation and shared headers, notification triggers and deprecated compatibility behavior.
 - Added listener configuration examples covering connection budgets, slow tasks, multiple queues,
   transactional acknowledgement and shutdown behavior.
 - Added opt-in JDBC lifecycle tests for a disposable PostgreSQL database, including connection

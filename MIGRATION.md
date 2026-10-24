@@ -7,6 +7,13 @@ intentionally removes backward compatibility.
 
 Version `2.1-1.13.1` bundles the upstream PGMQ `1.13.1` SQL script. Existing Java template
 calls remain supported; `createPartitioned` also accepts an explicit `premake` value, and
+`PgmqTemplate` includes SQL default-argument overloads and deprecated compatibility functions.
+See [the SQL API mapping](docs/sql-api.md) for their behavior. Transaction locks require the same
+database transaction to cover subsequent operations. Batch methods retain validation, header
+expansion and Java type information; upstream underscore-prefixed helpers remain SQL implementation
+details. `detachArchive` remains a SQL no-op, and the legacy boolean
+`dropQueue` overload retains upstream's unconditional true return value.
+
 `PgmqMetrics` adds nullable `defaultPartitionLength`. The seven-argument metrics constructor
 remains available for existing callers. Recompile applications using the metrics record.
 
@@ -40,7 +47,7 @@ Version `2.1-1.11.2` replaces the listener execution model and does not retain 2
 | `@PgmqListener(concurrency = ...)` | `@PgmqListener(consumerConcurrency = ...)` |
 | `PgmqListenerExecutionOptions` | Fields merged into `PgmqListenerContainerOptions` |
 | Two-argument executor factory methods | `createPollExecutor(options)` and `createConsumerExecutor(options)` |
-| `PgmqTemplate.detachArchive(...)` | Removed because the PGMQ 1.11.2 SQL function is a no-op |
+| `PgmqTemplate.detachArchive(...)` | Restored as a deprecated no-op for SQL compatibility with PGMQ 1.13.1 |
 
 `PgmqListenerContainerOptions` now contains consumer concurrency, poll concurrency, maximum
 in-flight messages, and executor shutdown timeout. Custom container factories must construct the

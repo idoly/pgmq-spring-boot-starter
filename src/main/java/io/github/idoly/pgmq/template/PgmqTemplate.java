@@ -95,8 +95,7 @@ public class PgmqTemplate {
     /**
      * Read visible messages using the default JSON conditional.
      *
-     * <p>This delegates to {@link #read(String, int, int, String)} with
-     * {@link #DEFAULT_CONDITIONAL}.</p>
+     * <p>The JSON conditional is supplied by the SQL function's default.</p>
      *
      * @param queue the queue name
      * @param vt visibility timeout in seconds
@@ -104,7 +103,9 @@ public class PgmqTemplate {
      * @return read messages
      */
     public List<PgmqMessage> read(@NonNull String queue, int vt, int qty) {
-        return read(queue, vt, qty, DEFAULT_CONDITIONAL);
+        validateReadArguments(queue, vt, qty);
+        String sql = "select * from pgmq.read(?, ?, ?)";
+        return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty);
     }
 
     /**
@@ -120,9 +121,7 @@ public class PgmqTemplate {
      * @return read messages
      */
     public List<PgmqMessage> read(@NonNull String queue, int vt, int qty, @NonNull String conditional) {
-        validateQueueNameArgument(queue);
-        validateVisibilityTimeout(vt);
-        validateQuantity(qty);
+        validateReadArguments(queue, vt, qty);
         Assert.hasText(conditional, "Conditional must not be empty");
         String sql = "select * from pgmq.read(?, ?, ?, ?::jsonb)";
         return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty, conditional);
@@ -131,8 +130,7 @@ public class PgmqTemplate {
     /**
      * Long-poll for visible messages using default polling options.
      *
-     * <p>Uses {@link #DEFAULT_MAX_POLL_SECONDS}, {@link #DEFAULT_POLL_INTERVAL_MS},
-     * and {@link #DEFAULT_CONDITIONAL}.</p>
+     * <p>Polling duration, interval and conditional are supplied by SQL defaults.</p>
      *
      * @param queue the queue name
      * @param vt visibility timeout in seconds
@@ -140,7 +138,9 @@ public class PgmqTemplate {
      * @return read messages
      */
     public List<PgmqMessage> readWithPoll(@NonNull String queue, int vt, int qty) {
-        return readWithPoll(queue, vt, qty, DEFAULT_MAX_POLL_SECONDS, DEFAULT_POLL_INTERVAL_MS, DEFAULT_CONDITIONAL);
+        validateReadArguments(queue, vt, qty);
+        String sql = "select * from pgmq.read_with_poll(?, ?, ?)";
+        return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty);
     }
 
     /**
@@ -155,9 +155,7 @@ public class PgmqTemplate {
      * @return read messages
      */
     public List<PgmqMessage> readWithPoll(@NonNull String queue, int vt, int qty, int maxPollSeconds, int pollIntervalMs, @NonNull String conditional) {
-        validateQueueNameArgument(queue);
-        validateVisibilityTimeout(vt);
-        validateQuantity(qty);
+        validateReadArguments(queue, vt, qty);
         validateMaxPollSeconds(maxPollSeconds);
         validatePollInterval(pollIntervalMs);
         Assert.hasText(conditional, "Conditional must not be empty");
@@ -169,6 +167,46 @@ public class PgmqTemplate {
     }
 
     /**
+     * Read with an explicit polling duration and the default polling interval and conditional.
+     *
+     * @param queue the queue name
+     * @param vt visibility timeout in seconds
+     * @param qty maximum number of messages
+     * @param maxPollSeconds maximum seconds to wait
+     * @return read messages
+     */
+    public List<PgmqMessage> readWithPoll(@NonNull String queue, int vt, int qty, int maxPollSeconds) {
+        validateReadArguments(queue, vt, qty);
+        validateMaxPollSeconds(maxPollSeconds);
+        if (maxPollSeconds == 0) {
+            return read(queue, vt, qty);
+        }
+        String sql = "select * from pgmq.read_with_poll(?, ?, ?, ?)";
+        return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty, maxPollSeconds);
+    }
+
+    /**
+     * Read with explicit polling options and the default JSON conditional.
+     *
+     * @param queue the queue name
+     * @param vt visibility timeout in seconds
+     * @param qty maximum number of messages
+     * @param maxPollSeconds maximum seconds to wait
+     * @param pollIntervalMs milliseconds between attempts
+     * @return read messages
+     */
+    public List<PgmqMessage> readWithPoll(@NonNull String queue, int vt, int qty, int maxPollSeconds, int pollIntervalMs) {
+        validateReadArguments(queue, vt, qty);
+        validateMaxPollSeconds(maxPollSeconds);
+        validatePollInterval(pollIntervalMs);
+        if (maxPollSeconds == 0) {
+            return read(queue, vt, qty);
+        }
+        String sql = "select * from pgmq.read_with_poll(?, ?, ?, ?, ?)";
+        return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty, maxPollSeconds, pollIntervalMs);
+    }
+
+    /**
      * Read messages using FIFO group-aware batch selection.
      *
      * @param queue the queue name
@@ -177,9 +215,7 @@ public class PgmqTemplate {
      * @return read messages
      */
     public List<PgmqMessage> readGrouped(@NonNull String queue, int vt, int qty) {
-        validateQueueNameArgument(queue);
-        validateVisibilityTimeout(vt);
-        validateQuantity(qty);
+        validateReadArguments(queue, vt, qty);
         String sql = "select * from pgmq.read_grouped(?, ?, ?)";
         return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty);
     }
@@ -193,7 +229,9 @@ public class PgmqTemplate {
      * @return read messages
      */
     public List<PgmqMessage> readGroupedWithPoll(@NonNull String queue, int vt, int qty) {
-        return readGroupedWithPoll(queue, vt, qty, DEFAULT_MAX_POLL_SECONDS, DEFAULT_POLL_INTERVAL_MS);
+        validateReadArguments(queue, vt, qty);
+        String sql = "select * from pgmq.read_grouped_with_poll(?, ?, ?)";
+        return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty);
     }
 
     /**
@@ -207,9 +245,7 @@ public class PgmqTemplate {
      * @return read messages
      */
     public List<PgmqMessage> readGroupedWithPoll(@NonNull String queue, int vt, int qty, int maxPollSeconds, int pollIntervalMs) {
-        validateQueueNameArgument(queue);
-        validateVisibilityTimeout(vt);
-        validateQuantity(qty);
+        validateReadArguments(queue, vt, qty);
         validateMaxPollSeconds(maxPollSeconds);
         validatePollInterval(pollIntervalMs);
         if (maxPollSeconds == 0) {
@@ -217,6 +253,25 @@ public class PgmqTemplate {
         }
         String sql = "select * from pgmq.read_grouped_with_poll(?, ?, ?, ?, ?)";
         return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty, maxPollSeconds, pollIntervalMs);
+    }
+
+    /**
+     * Read grouped messages with an explicit polling duration and default polling interval.
+     *
+     * @param queue the queue name
+     * @param vt visibility timeout in seconds
+     * @param qty maximum number of messages
+     * @param maxPollSeconds maximum seconds to wait
+     * @return read messages
+     */
+    public List<PgmqMessage> readGroupedWithPoll(@NonNull String queue, int vt, int qty, int maxPollSeconds) {
+        validateReadArguments(queue, vt, qty);
+        validateMaxPollSeconds(maxPollSeconds);
+        if (maxPollSeconds == 0) {
+            return readGrouped(queue, vt, qty);
+        }
+        String sql = "select * from pgmq.read_grouped_with_poll(?, ?, ?, ?)";
+        return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty, maxPollSeconds);
     }
 
     /**
@@ -228,9 +283,7 @@ public class PgmqTemplate {
      * @return read messages
      */
     public List<PgmqMessage> readGroupedRoundRobin(@NonNull String queue, int vt, int qty) {
-        validateQueueNameArgument(queue);
-        validateVisibilityTimeout(vt);
-        validateQuantity(qty);
+        validateReadArguments(queue, vt, qty);
         String sql = "select * from pgmq.read_grouped_rr(?, ?, ?)";
         return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty);
     }
@@ -244,7 +297,9 @@ public class PgmqTemplate {
      * @return read messages
      */
     public List<PgmqMessage> readGroupedRoundRobinWithPoll(@NonNull String queue, int vt, int qty) {
-        return readGroupedRoundRobinWithPoll(queue, vt, qty, DEFAULT_MAX_POLL_SECONDS, DEFAULT_POLL_INTERVAL_MS);
+        validateReadArguments(queue, vt, qty);
+        String sql = "select * from pgmq.read_grouped_rr_with_poll(?, ?, ?)";
+        return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty);
     }
 
     /**
@@ -258,9 +313,7 @@ public class PgmqTemplate {
      * @return read messages
      */
     public List<PgmqMessage> readGroupedRoundRobinWithPoll(@NonNull String queue, int vt, int qty, int maxPollSeconds, int pollIntervalMs) {
-        validateQueueNameArgument(queue);
-        validateVisibilityTimeout(vt);
-        validateQuantity(qty);
+        validateReadArguments(queue, vt, qty);
         validateMaxPollSeconds(maxPollSeconds);
         validatePollInterval(pollIntervalMs);
         if (maxPollSeconds == 0) {
@@ -279,9 +332,7 @@ public class PgmqTemplate {
      * @return read messages
      */
     public List<PgmqMessage> readGroupedHead(@NonNull String queue, int vt, int qty) {
-        validateQueueNameArgument(queue);
-        validateVisibilityTimeout(vt);
-        validateQuantity(qty);
+        validateReadArguments(queue, vt, qty);
         String sql = "select * from pgmq.read_grouped_head(?, ?, ?)";
         return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty);
     }
@@ -295,7 +346,9 @@ public class PgmqTemplate {
      * @return read messages
      */
     public List<PgmqMessage> readGroupedHeadWithPoll(@NonNull String queue, int vt, int qty) {
-        return readGroupedHeadWithPoll(queue, vt, qty, DEFAULT_MAX_POLL_SECONDS, DEFAULT_POLL_INTERVAL_MS);
+        validateReadArguments(queue, vt, qty);
+        String sql = "select * from pgmq.read_grouped_head_with_poll(?, ?, ?)";
+        return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty);
     }
 
     /**
@@ -309,9 +362,7 @@ public class PgmqTemplate {
      * @return read messages
      */
     public List<PgmqMessage> readGroupedHeadWithPoll(@NonNull String queue, int vt, int qty, int maxPollSeconds, int pollIntervalMs) {
-        validateQueueNameArgument(queue);
-        validateVisibilityTimeout(vt);
-        validateQuantity(qty);
+        validateReadArguments(queue, vt, qty);
         validateMaxPollSeconds(maxPollSeconds);
         validatePollInterval(pollIntervalMs);
         if (maxPollSeconds == 0) {
@@ -319,6 +370,44 @@ public class PgmqTemplate {
         }
         String sql = "select * from pgmq.read_grouped_head_with_poll(?, ?, ?, ?, ?)";
         return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty, maxPollSeconds, pollIntervalMs);
+    }
+
+    /**
+     * Read round-robin groups with an explicit polling duration and default polling interval.
+     *
+     * @param queue the queue name
+     * @param vt visibility timeout in seconds
+     * @param qty maximum number of messages
+     * @param maxPollSeconds maximum seconds to wait
+     * @return read messages
+     */
+    public List<PgmqMessage> readGroupedRoundRobinWithPoll(@NonNull String queue, int vt, int qty, int maxPollSeconds) {
+        validateReadArguments(queue, vt, qty);
+        validateMaxPollSeconds(maxPollSeconds);
+        if (maxPollSeconds == 0) {
+            return readGroupedRoundRobin(queue, vt, qty);
+        }
+        String sql = "select * from pgmq.read_grouped_rr_with_poll(?, ?, ?, ?)";
+        return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty, maxPollSeconds);
+    }
+
+    /**
+     * Read FIFO group heads with an explicit polling duration and default polling interval.
+     *
+     * @param queue the queue name
+     * @param vt visibility timeout in seconds
+     * @param qty maximum number of messages
+     * @param maxPollSeconds maximum seconds to wait
+     * @return read messages
+     */
+    public List<PgmqMessage> readGroupedHeadWithPoll(@NonNull String queue, int vt, int qty, int maxPollSeconds) {
+        validateReadArguments(queue, vt, qty);
+        validateMaxPollSeconds(maxPollSeconds);
+        if (maxPollSeconds == 0) {
+            return readGroupedHead(queue, vt, qty);
+        }
+        String sql = "select * from pgmq.read_grouped_head_with_poll(?, ?, ?, ?)";
+        return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty, maxPollSeconds);
     }
 
     /**
@@ -504,6 +593,36 @@ public class PgmqTemplate {
     }
 
     /**
+     * Send a batch with shared headers and an integer delay.
+     *
+     * @param queue the target queue
+     * @param msgs message payloads
+     * @param headers shared headers
+     * @param delay delay in seconds
+     * @return inserted message IDs
+     */
+    public List<Long> sendBatch(@NonNull String queue, @NonNull List<Object> msgs,
+            @NonNull Map<String, Object> headers, int delay) {
+        Assert.notNull(headers, "Headers must not be null");
+        return sendBatch(queue, msgs, List.of(headers), delay);
+    }
+
+    /**
+     * Send a batch with shared headers and an absolute visibility timestamp.
+     *
+     * @param queue the target queue
+     * @param msgs message payloads
+     * @param headers shared headers
+     * @param visibleAt timestamp when messages become visible
+     * @return inserted message IDs
+     */
+    public List<Long> sendBatch(@NonNull String queue, @NonNull List<Object> msgs,
+            @NonNull Map<String, Object> headers, @NonNull OffsetDateTime visibleAt) {
+        Assert.notNull(headers, "Headers must not be null");
+        return sendBatch(queue, msgs, List.of(headers), visibleAt);
+    }
+
+    /**
      * Send messages immediately with shared or per-message headers.
      *
      * @param queue the target queue name
@@ -570,7 +689,7 @@ public class PgmqTemplate {
      * @throws PgmqException if {@code headers} contains more than one element and its size does not match {@code msgs}
      */
     public List<Long> sendBatch(@NonNull String queue, @NonNull List<Object> msgs,
-            List<Map<String, Object>> headers, @NonNull OffsetDateTime visibleAt) {
+            @NonNull List<Map<String, Object>> headers, @NonNull OffsetDateTime visibleAt) {
         Assert.notNull(visibleAt, "Visibility timestamp must not be null");
         return sendBatchInternal(queue, msgs, headers, visibleAt);
     }
@@ -640,7 +759,9 @@ public class PgmqTemplate {
      * @return popped messages
      */
     public List<PgmqMessage> pop(@NonNull String queue) {
-        return pop(queue, 1);
+        validateQueueNameArgument(queue);
+        String sql = "select * from pgmq.pop(?)";
+        return jdbcTemplate.query(sql, new MessageRecordMapper(), queue);
     }
 
     /**
@@ -731,6 +852,62 @@ public class PgmqTemplate {
         validateQueueNameArgument(queue);
         String sql = "select pgmq.drop_queue(?)";
         return jdbcTemplate.queryForObject(sql, Boolean.class, queue);
+    }
+
+    /**
+     * Acquire the transaction-level advisory lock used by PGMQ queue administration.
+     *
+     * <p>Use a transaction on this template's data source when the lock must cover subsequent
+     * operations. In auto-commit mode PostgreSQL releases it when this statement completes.</p>
+     *
+     * @param queue the queue name
+     */
+    public void acquireQueueLock(@NonNull String queue) {
+        validateQueueNameArgument(queue);
+        String sql = "select pgmq.acquire_queue_lock(?)";
+        jdbcTemplate.queryForObject(sql, Object.class, queue);
+    }
+
+    /**
+     * Format a PGMQ table name using the SQL validator and lowercasing rules.
+     *
+     * @param queue the queue name
+     * @param prefix table prefix, for example {@code q} or {@code a}
+     * @return the unqualified table name
+     */
+    public String formatTableName(@NonNull String queue, @NonNull String prefix) {
+        validateQueueNameArgument(queue);
+        Assert.hasText(prefix, "Table prefix must not be empty");
+        String sql = "select pgmq.format_table_name(?, ?)";
+        return jdbcTemplate.queryForObject(sql, String.class, queue, prefix);
+    }
+
+    /**
+     * Call the legacy queue-drop overload, whose partitioned flag is ignored by PGMQ 1.13.1.
+     *
+     * @param queue the queue name
+     * @param partitioned legacy partitioned flag
+     * @return the result returned by the legacy SQL overload
+     * @deprecated use {@link #dropQueue(String)}; upstream removes this overload in PGMQ 2.0
+     */
+    @Deprecated(since = "2.1-1.13.1")
+    public Boolean dropQueue(@NonNull String queue, boolean partitioned) {
+        validateQueueNameArgument(queue);
+        String sql = "select pgmq.drop_queue(?, ?)";
+        return jdbcTemplate.queryForObject(sql, Boolean.class, queue, partitioned);
+    }
+
+    /**
+     * Call the deprecated SQL archive-detach function.
+     *
+     * @param queue the queue name
+     * @deprecated PGMQ 1.13.1 implements this as a no-op and removes it in PGMQ 2.0
+     */
+    @Deprecated(since = "2.1-1.13.1")
+    public void detachArchive(@NonNull String queue) {
+        validateQueueNameArgument(queue);
+        String sql = "select pgmq.detach_archive(?)";
+        jdbcTemplate.queryForObject(sql, Object.class, queue);
     }
 
     /**
@@ -847,6 +1024,22 @@ public class PgmqTemplate {
     }
 
     /**
+     * Create a partitioned queue, leaving retention and premake defaults to PostgreSQL.
+     *
+     * @param queue the queue name
+     * @param partitionInterval partition size as a numeric value or time interval
+     */
+    public void createPartitioned(@NonNull String queue, @NonNull String partitionInterval) {
+        validateQueueNameArgument(queue);
+        Assert.hasText(partitionInterval, "Partition interval must not be empty");
+        if (!Boolean.TRUE.equals(isPartmanInstalled())) {
+            throw new PgmqException("pg_partman extension is required for partitioned queues");
+        }
+        String sql = "select pgmq.create_partitioned(?, ?)";
+        jdbcTemplate.queryForObject(sql, Object.class, queue, partitionInterval);
+    }
+
+    /**
      * Create a standard durable queue.
      *
      * @param queue the queue name
@@ -863,7 +1056,7 @@ public class PgmqTemplate {
      * <p>This method checks that the {@code pg_partman} extension is installed before
      * calling {@code pgmq.convert_archive_partitioned()}.</p>
      *
-     * @param tableName the archive table name to convert
+     * @param tableName the queue name whose archive is converted
      * @param partitionInterval the partition size as a numeric value or time interval
      * @param retentionInterval the retention size as a numeric value or time interval
      * @param leadingPartition the number of partitions to create in advance
@@ -884,7 +1077,7 @@ public class PgmqTemplate {
     /**
      * Convert an existing archive table with default partition settings.
      *
-     * @param tableName the archive table name to convert
+     * @param tableName the queue name whose archive is converted
      */
     public void convertArchivePartitioned(@NonNull String tableName) {
         validateQueueNameArgument(tableName);
@@ -894,6 +1087,41 @@ public class PgmqTemplate {
 
         String sql = "select pgmq.convert_archive_partitioned(?)";
         jdbcTemplate.queryForObject(sql, Object.class, tableName);
+    }
+
+    /**
+     * Convert an archive, leaving retention and leading-partition defaults to PostgreSQL.
+     *
+     * @param tableName the queue name whose archive is converted
+     * @param partitionInterval partition size as a numeric value or time interval
+     */
+    public void convertArchivePartitioned(@NonNull String tableName, @NonNull String partitionInterval) {
+        validateQueueNameArgument(tableName);
+        Assert.hasText(partitionInterval, "Partition interval must not be empty");
+        if (!Boolean.TRUE.equals(isPartmanInstalled())) {
+            throw new PgmqException("pg_partman extension is required for partitioned archives");
+        }
+        String sql = "select pgmq.convert_archive_partitioned(?, ?)";
+        jdbcTemplate.queryForObject(sql, Object.class, tableName, partitionInterval);
+    }
+
+    /**
+     * Convert an archive, leaving the leading-partition default to PostgreSQL.
+     *
+     * @param tableName the queue name whose archive is converted
+     * @param partitionInterval partition size as a numeric value or time interval
+     * @param retentionInterval retention size as a numeric value or time interval
+     */
+    public void convertArchivePartitioned(@NonNull String tableName, @NonNull String partitionInterval,
+            @NonNull String retentionInterval) {
+        validateQueueNameArgument(tableName);
+        Assert.hasText(partitionInterval, "Partition interval must not be empty");
+        Assert.hasText(retentionInterval, "Retention interval must not be empty");
+        if (!Boolean.TRUE.equals(isPartmanInstalled())) {
+            throw new PgmqException("pg_partman extension is required for partitioned archives");
+        }
+        String sql = "select pgmq.convert_archive_partitioned(?, ?, ?)";
+        jdbcTemplate.queryForObject(sql, Object.class, tableName, partitionInterval, retentionInterval);
     }
 
     /**
@@ -1154,6 +1382,36 @@ public class PgmqTemplate {
     }
 
     /**
+     * Send a topic batch with shared headers and an integer delay.
+     *
+     * @param routingKey the routing key
+     * @param msgs message payloads
+     * @param headers shared headers
+     * @param delay delay in seconds
+     * @return inserted message IDs with queue names
+     */
+    public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<Object> msgs,
+            @NonNull Map<String, Object> headers, int delay) {
+        Assert.notNull(headers, "Headers must not be null");
+        return sendBatchTopic(routingKey, msgs, List.of(headers), delay);
+    }
+
+    /**
+     * Send a topic batch with shared headers and an absolute visibility timestamp.
+     *
+     * @param routingKey the routing key
+     * @param msgs message payloads
+     * @param headers shared headers
+     * @param visibleAt timestamp when messages become visible
+     * @return inserted message IDs with queue names
+     */
+    public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<Object> msgs,
+            @NonNull Map<String, Object> headers, @NonNull OffsetDateTime visibleAt) {
+        Assert.notNull(headers, "Headers must not be null");
+        return sendBatchTopic(routingKey, msgs, List.of(headers), visibleAt);
+    }
+
+    /**
      * Send topic messages immediately with shared or per-message headers.
      *
      * @param routingKey the routing key
@@ -1220,7 +1478,7 @@ public class PgmqTemplate {
      * @throws PgmqException if {@code headers} contains more than one element and its size does not match {@code msgs}
      */
     public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<Object> msgs,
-            List<Map<String, Object>> headers, @NonNull OffsetDateTime visibleAt) {
+            @NonNull List<Map<String, Object>> headers, @NonNull OffsetDateTime visibleAt) {
         Assert.notNull(visibleAt, "Visibility timestamp must not be null");
         return sendBatchTopicInternal(routingKey, msgs, headers, visibleAt);
     }
@@ -1291,6 +1549,13 @@ public class PgmqTemplate {
      */
     private static void validateQueueNameArgument(String queueName) {
         Assert.hasText(queueName, "Queue name must not be empty");
+    }
+
+    /** Validate the arguments shared by all message reads. */
+    private static void validateReadArguments(String queue, int vt, int qty) {
+        validateQueueNameArgument(queue);
+        validateVisibilityTimeout(vt);
+        validateQuantity(qty);
     }
 
     /**

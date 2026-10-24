@@ -3,6 +3,7 @@ package io.github.idoly.pgmq.listener;
 import static org.junit.jupiter.api.Assertions.*;
 
 import java.sql.SQLException;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -31,11 +32,13 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.annotation.EnableTransactionManagement;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariDataSource;
 
+import io.github.idoly.pgmq.PgmqException;
 import io.github.idoly.pgmq.annotation.PgmqListener;
 import io.github.idoly.pgmq.config.PgmqAutoConfiguration;
 import io.github.idoly.pgmq.config.PgmqInitializer;
@@ -89,6 +92,143 @@ class PgmqJdbcLifecycleIntegrationTest {
             adminTemplate.setVt(queue, id, 0);
             assertEquals(id, read.get().get(0).msgId());
         }
+    }
+
+    @Test
+    void queueLockFollowsTheCallingTransaction() {
+        var contender = new JdbcTemplate(new DriverManagerDataSource(System.getenv("PGMQ_TEST_JDBC_URL"),
+                username(), System.getenv().getOrDefault("PGMQ_TEST_PASSWORD", "postgres")));
+        var transaction = new TransactionTemplate(new DataSourceTransactionManager(admin.getDataSource()));
+        String tryLock = "select pg_try_advisory_xact_lock(hashtext('pgmq.queue_' || ?))";
+        transaction.executeWithoutResult(status -> {
+            adminTemplate.acquireQueueLock(queue);
+            assertFalse(contender.queryForObject(tryLock, Boolean.class, queue));
+        });
+        assertTrue(contender.queryForObject(tryLock, Boolean.class, queue));
+        transaction.executeWithoutResult(status -> {
+            adminTemplate.acquireQueueLock(queue);
+            assertFalse(contender.queryForObject(tryLock, Boolean.class, queue));
+            status.setRollbackOnly();
+        });
+        assertTrue(contender.queryForObject(tryLock, Boolean.class, queue));
+        adminTemplate.acquireQueueLock(queue);
+        assertTrue(contender.queryForObject(tryLock, Boolean.class, queue),
+                "auto-commit must release the transaction lock at statement completion");
+    }
+
+    @Test
+    void publicQueueHelpersUseSqlValidationAndPartmanChecks() {
+        assertEquals("q_mixedcase", adminTemplate.formatTableName("MixedCase", "Q"));
+        assertThrows(DataAccessException.class, () -> adminTemplate.formatTableName("bad;queue", "q"));
+        if (!adminTemplate.isPartmanInstalled()) {
+            assertThrows(PgmqException.class,
+                    () -> adminTemplate.createPartitioned(queue, "1000", "10000", 2));
+            assertThrows(PgmqException.class,
+                    () -> adminTemplate.convertArchivePartitioned(queue, "1000", "10000", 2));
+        }
+    }
+
+    @Test
+    void publicBatchSendsValidateArraysAndExpandSharedHeaders() {
+        assertThrows(IllegalArgumentException.class, () -> adminTemplate.sendBatch(queue, List.of()));
+        var headers = Map.<String, Object>of("source", "shared");
+        assertThrows(PgmqException.class,
+                () -> adminTemplate.sendBatch(queue, List.of("one", "two"), List.of(headers, headers, headers)));
+        var ids = adminTemplate.sendBatch(queue, List.of("one", "two"), List.of(headers));
+        assertEquals(2, ids.size());
+        var messages = adminTemplate.read(queue, 30, 2);
+        assertEquals(List.of("one", "two"), messages.stream().map(PgmqMessage::payload).toList());
+        for (var message : messages) {
+            assertEquals("shared", message.headers().get("source"));
+            assertEquals("java.lang.String", message.headers().get(PgmqTemplate.TYPE_HEADER));
+        }
+    }
+
+    @Test
+    @SuppressWarnings("deprecation")
+    void legacyDetachIsANoopAndLegacyDropPreservesItsSqlReturnValue() {
+        long id = adminTemplate.send(queue, "archived");
+        adminTemplate.archive(queue, id);
+        adminTemplate.detachArchive(queue);
+        assertEquals(1, admin.queryForObject("select count(*) from pgmq.a_" + queue, Integer.class));
+        assertTrue(adminTemplate.dropQueue(queue, false));
+        assertTrue(adminTemplate.dropQueue(queue, true), "legacy SQL returns true even when the queue is missing");
+    }
+
+    @Test
+    void triggerOnlyFunctionIsCoveredThroughInsertNotificationRegistration() {
+        adminTemplate.enableNotifyInsert(queue, 0);
+        adminTemplate.send(queue, "notify");
+        var throttle = adminTemplate.listNotifyInsertThrottles().stream()
+                .filter(row -> row.queueName().equals(queue)).findFirst().orElseThrow();
+        assertTrue(throttle.lastNotifiedAt().toInstant().isAfter(java.time.Instant.EPOCH));
+        var error = assertThrows(DataAccessException.class,
+                () -> admin.queryForObject("select pgmq.notify_queue_listeners()", Object.class));
+        assertTrue(error.getMostSpecificCause().getMessage().contains("trigger"));
+    }
+
+    @Test
+    void partialPollingOverloadsReadVisibleMessages() {
+        long id = adminTemplate.send(queue, "visible");
+        var reads = List.<java.util.function.Supplier<List<PgmqMessage>>>of(
+                () -> adminTemplate.readWithPoll(queue, 30, 1, 1),
+                () -> adminTemplate.readWithPoll(queue, 30, 1, 1, 25),
+                () -> adminTemplate.readGroupedWithPoll(queue, 30, 1, 1),
+                () -> adminTemplate.readGroupedRoundRobinWithPoll(queue, 30, 1, 1),
+                () -> adminTemplate.readGroupedHeadWithPoll(queue, 30, 1, 1));
+        for (var read : reads) {
+            adminTemplate.setVt(queue, id, 0);
+            assertEquals(id, read.get().get(0).msgId());
+        }
+    }
+
+    @Test
+    void omittedReadAndPopArgumentsUseServerDefaults() {
+        long id = adminTemplate.send(queue, "first");
+        var reads = List.<java.util.function.Supplier<List<PgmqMessage>>>of(
+                () -> adminTemplate.read(queue, 30, 1),
+                () -> adminTemplate.readWithPoll(queue, 30, 1),
+                () -> adminTemplate.readGroupedWithPoll(queue, 30, 1),
+                () -> adminTemplate.readGroupedRoundRobinWithPoll(queue, 30, 1),
+                () -> adminTemplate.readGroupedHeadWithPoll(queue, 30, 1));
+        for (var read : reads) {
+            adminTemplate.setVt(queue, id, 0);
+            assertEquals(id, read.get().get(0).msgId());
+        }
+        adminTemplate.setVt(queue, id, 0);
+        adminTemplate.send(queue, "second");
+        var popped = adminTemplate.pop(queue);
+        assertEquals(1, popped.size());
+        assertEquals(id, popped.get(0).msgId());
+        assertEquals(1L, adminTemplate.getMetrics(queue).queueLength());
+    }
+
+    @Test
+    void sharedHeadersWorkWithDelayAndTimestampForQueueAndTopicBatches() {
+        var headers = Map.<String, Object>of("source", "shared");
+        var at = OffsetDateTime.now().minusSeconds(1);
+        adminTemplate.sendBatch(queue, List.of("batch-delay"), headers, 0);
+        adminTemplate.sendBatch(queue, List.of("batch-time"), headers, at);
+        adminTemplate.bindTopic("validation.*", queue);
+        assertEquals(1, adminTemplate.sendBatchTopic("validation.created", List.of("topic-delay"), headers, 0).size());
+        assertEquals(1, adminTemplate.sendBatchTopic("validation.created", List.of("topic-time"), headers, at).size());
+        var messages = adminTemplate.read(queue, 30, 10);
+        assertEquals(List.of("batch-delay", "batch-time", "topic-delay", "topic-time"),
+                messages.stream().map(PgmqMessage::payload).toList());
+        for (var message : messages) {
+            assertEquals("shared", message.headers().get("source"));
+            assertEquals("java.lang.String", message.headers().get(PgmqTemplate.TYPE_HEADER));
+        }
+        assertEquals(Map.of("source", "shared"), headers);
+    }
+
+    @Test
+    void publicFifoIndexCreationCanBeCalledRepeatedly() {
+        adminTemplate.createFifoIndex(queue);
+        adminTemplate.createFifoIndex(queue);
+        String index = adminTemplate.formatTableName(queue, "q") + "_fifo_idx";
+        assertEquals(1, admin.queryForObject("select count(*) from pg_indexes where schemaname = 'pgmq'"
+                + " and indexname = ?", Integer.class, index));
     }
 
     @Test

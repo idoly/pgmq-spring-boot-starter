@@ -126,6 +126,10 @@ public PgmqQueue eventsQueue() {
 
 Inject `io.github.idoly.pgmq.template.PgmqTemplate` for direct access to PGMQ operations.
 Messages returned by reads are `io.github.idoly.pgmq.message.PgmqMessage` records.
+The template maps the public SQL entry points, including default-argument overloads and deprecated
+compatibility functions. Underscore-prefixed SQL helpers stay in the database implementation.
+See [the SQL API mapping](docs/sql-api.md) for the complete public mapping, transaction-lock scope
+and trigger-only notification function.
 
 ```java
 import io.github.idoly.pgmq.message.PgmqMessage;

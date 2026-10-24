@@ -133,6 +133,129 @@ class PgmqTemplateSerializationTest {
     }
 
     @Test
+    void partialPartitionOverloadsLeaveOmittedDefaultsToSql() {
+        var jdbc = new CapturingJdbcTemplate();
+        var template = new PgmqTemplate(jdbc, objectMapper);
+
+        template.createPartitioned("queue", "1 day");
+        assertEquals("select pgmq.create_partitioned(?, ?)", jdbc.sql);
+        assertArrayEquals(new Object[] {"queue", "1 day"}, jdbc.args);
+        template.convertArchivePartitioned("queue", "1 day");
+        assertEquals("select pgmq.convert_archive_partitioned(?, ?)", jdbc.sql);
+        assertArrayEquals(new Object[] {"queue", "1 day"}, jdbc.args);
+        template.convertArchivePartitioned("queue", "1 day", "7 days");
+        assertEquals("select pgmq.convert_archive_partitioned(?, ?, ?)", jdbc.sql);
+        assertArrayEquals(new Object[] {"queue", "1 day", "7 days"}, jdbc.args);
+    }
+
+    @Test
+    void fullPartitionOverloadsCallThePublicSqlWrappers() {
+        var jdbc = new CapturingJdbcTemplate();
+        var template = new PgmqTemplate(jdbc, objectMapper);
+
+        template.createPartitioned("queue", "1000", "10000", 3);
+        assertEquals("select pgmq.create_partitioned(?, ?, ?, ?)", jdbc.sql);
+        assertArrayEquals(new Object[] {"queue", "1000", "10000", 3}, jdbc.args);
+        template.convertArchivePartitioned("queue", "1000", "10000", 5);
+        assertEquals("select pgmq.convert_archive_partitioned(?, ?, ?, ?)", jdbc.sql);
+        assertArrayEquals(new Object[] {"queue", "1000", "10000", 5}, jdbc.args);
+    }
+
+    @Test
+    @SuppressWarnings("deprecation")
+    void deprecatedWrappersCallTheActualLegacySqlOverloads() {
+        var jdbc = new CapturingJdbcTemplate();
+        var template = new PgmqTemplate(jdbc, objectMapper);
+        template.detachArchive("queue");
+        assertEquals("select pgmq.detach_archive(?)", jdbc.sql);
+        assertArrayEquals(new Object[] {"queue"}, jdbc.args);
+        assertTrue(template.dropQueue("queue", false));
+        assertEquals("select pgmq.drop_queue(?, ?)", jdbc.sql);
+        assertArrayEquals(new Object[] {"queue", false}, jdbc.args);
+    }
+
+    @Test
+    void partialPollingOverloadsPreserveExplicitOptionsAndZeroDurationBehavior() {
+        var jdbc = new CapturingJdbcTemplate();
+        var template = new PgmqTemplate(jdbc, objectMapper);
+        template.readWithPoll("queue", 30, 2, 7);
+        assertEquals("select * from pgmq.read_with_poll(?, ?, ?, ?)", jdbc.sql);
+        assertArrayEquals(new Object[] {"queue", 30, 2, 7}, jdbc.args);
+        template.readWithPoll("queue", 30, 2, 7, 25);
+        assertEquals("select * from pgmq.read_with_poll(?, ?, ?, ?, ?)", jdbc.sql);
+        assertArrayEquals(new Object[] {"queue", 30, 2, 7, 25}, jdbc.args);
+        template.readGroupedWithPoll("queue", 30, 2, 7);
+        assertArrayEquals(new Object[] {"queue", 30, 2, 7}, jdbc.args);
+        template.readGroupedRoundRobinWithPoll("queue", 30, 2, 7);
+        assertArrayEquals(new Object[] {"queue", 30, 2, 7}, jdbc.args);
+        template.readGroupedHeadWithPoll("queue", 30, 2, 0);
+        assertEquals("select * from pgmq.read_grouped_head(?, ?, ?)", jdbc.sql);
+    }
+
+    @Test
+    void defaultReadPollAndPopOverloadsOmitDefaultedSqlArguments() {
+        var jdbc = new CapturingJdbcTemplate();
+        var template = new PgmqTemplate(jdbc, objectMapper);
+        var calls = List.<Runnable>of(
+                () -> template.read("queue", 30, 2),
+                () -> template.readWithPoll("queue", 30, 2),
+                () -> template.readGroupedWithPoll("queue", 30, 2),
+                () -> template.readGroupedRoundRobinWithPoll("queue", 30, 2),
+                () -> template.readGroupedHeadWithPoll("queue", 30, 2));
+        var functions = List.of("read", "read_with_poll", "read_grouped_with_poll",
+                "read_grouped_rr_with_poll", "read_grouped_head_with_poll");
+        for (int i = 0; i < calls.size(); i++) {
+            calls.get(i).run();
+            assertEquals("select * from pgmq." + functions.get(i) + "(?, ?, ?)", jdbc.sql);
+            assertArrayEquals(new Object[] {"queue", 30, 2}, jdbc.args);
+        }
+        template.pop("queue");
+        assertEquals("select * from pgmq.pop(?)", jdbc.sql);
+        assertArrayEquals(new Object[] {"queue"}, jdbc.args);
+    }
+
+    @Test
+    void sharedBatchHeaderOverloadsReuseExpansionAndTypeHeaders() throws Exception {
+        var jdbc = new CapturingJdbcTemplate();
+        var template = new PgmqTemplate(jdbc, objectMapper);
+        var headers = Map.<String, Object>of("source", "shared");
+        List<Object> messages = List.of("one", "two");
+        var at = OffsetDateTime.parse("2026-07-04T00:00:00Z");
+        var calls = List.<Runnable>of(
+                () -> template.sendBatch("queue", messages, headers, 7),
+                () -> template.sendBatch("queue", messages, headers, at),
+                () -> template.sendBatchTopic("events.created", messages, headers, 7),
+                () -> template.sendBatchTopic("events.created", messages, headers, at));
+        var visibility = List.<Object>of(7, at, 7, at);
+        for (int i = 0; i < calls.size(); i++) {
+            calls.get(i).run();
+            assertEquals(visibility.get(i), jdbc.args[3]);
+            String[] encodedHeaders = (String[]) jdbc.args[2];
+            assertEquals(2, encodedHeaders.length);
+            for (String encoded : encodedHeaders) {
+                Map<?, ?> value = objectMapper.readValue(encoded, Map.class);
+                assertEquals("shared", value.get("source"));
+                assertEquals("java.lang.String", value.get(PgmqTemplate.TYPE_HEADER));
+            }
+        }
+        assertEquals(Map.of("source", "shared"), headers);
+    }
+
+    @Test
+    void queueHelpersKeepTheirReturnTypes() {
+        var jdbc = new CapturingJdbcTemplate();
+        var template = new PgmqTemplate(jdbc, objectMapper);
+        template.acquireQueueLock("queue");
+        assertEquals("select pgmq.acquire_queue_lock(?)", jdbc.sql);
+        assertSame(Object.class, jdbc.requiredType);
+        template.formatTableName("Mixed", "q");
+        assertSame(String.class, jdbc.requiredType);
+        assertArrayEquals(new Object[] {"Mixed", "q"}, jdbc.args);
+        template.isPartmanInstalled();
+        assertSame(Boolean.class, jdbc.requiredType);
+    }
+
+    @Test
     void createFifoIndexesAllCallsCurrentSqlFunction() {
         CapturingJdbcTemplate jdbcTemplate = new CapturingJdbcTemplate();
         PgmqTemplate pgmqTemplate = new PgmqTemplate(jdbcTemplate, objectMapper);
