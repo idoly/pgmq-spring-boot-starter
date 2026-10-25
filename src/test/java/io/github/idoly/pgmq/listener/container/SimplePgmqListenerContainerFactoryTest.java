@@ -51,6 +51,25 @@ class SimplePgmqListenerContainerFactoryTest {
         assertThrows(PgmqException.class, () -> factory.createListenerContainer(endpoint(handler, "invalidPollInterval")));
     }
 
+    @Test
+    void resolvesStringsAndRejectsInvalidInheritanceSentinels() throws Exception {
+        var factory = factory();
+        factory.setEmbeddedValueResolver(value -> switch (value) {
+            case "${listener.start}" -> " true ";
+            case "${listener.filter}" -> "{\"kind\":\"created\"}";
+            default -> value;
+        });
+        var options = factory.createListenerContainer(endpoint(new Handler(), "placeholders")).getOptions();
+        assertEquals(true, options.autoStartup());
+        assertEquals("{\"kind\":\"created\"}", options.conditional());
+        assertEquals(true, factory.createListenerContainer(endpoint(new Handler(), "enabledAlias")).getOptions().autoStartup());
+        assertEquals(false, factory.createListenerContainer(endpoint(new Handler(), "disabledAlias")).getOptions().autoStartup());
+        assertThrows(PgmqException.class,
+                () -> factory.createListenerContainer(endpoint(new Handler(), "invalidSentinel")));
+        assertThrows(PgmqException.class,
+                () -> factory.createListenerContainer(endpoint(new Handler(), "invalidBoolean")));
+    }
+
     private static SimplePgmqListenerContainerFactory factory() {
         return new SimplePgmqListenerContainerFactory(
                 new PgmqTemplate(new JdbcTemplate(), new ObjectMapper()),
@@ -82,6 +101,21 @@ class SimplePgmqListenerContainerFactoryTest {
         @PgmqListener(value = "queue", maxPollSeconds = 0)
         void zeroMaxPollSeconds(String payload) {
         }
+
+        @PgmqListener(value = "queue", autoStartup = "${listener.start}", conditional = "${listener.filter}")
+        void placeholders(String payload) {}
+
+        @PgmqListener(value = "queue", autoStartup = "on")
+        void enabledAlias(String payload) {}
+
+        @PgmqListener(value = "queue", autoStartup = "off")
+        void disabledAlias(String payload) {}
+
+        @PgmqListener(value = "queue", maxPollSeconds = -2)
+        void invalidSentinel(String payload) {}
+
+        @PgmqListener(value = "queue", autoStartup = "tru")
+        void invalidBoolean(String payload) {}
 
         @PgmqListener(value = "queue", pollIntervalMs = 0)
         void invalidPollInterval(String payload) {

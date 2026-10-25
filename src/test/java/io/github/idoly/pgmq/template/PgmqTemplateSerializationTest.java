@@ -3,6 +3,7 @@ package io.github.idoly.pgmq.template;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -339,6 +340,130 @@ class PgmqTemplateSerializationTest {
         assertEquals("select * from pgmq.read_grouped_rr(?, ?, ?)", jdbcTemplate.sql);
         template.readGroupedHeadWithPoll("queue", 30, 2, 0, 100);
         assertEquals("select * from pgmq.read_grouped_head(?, ?, ?)", jdbcTemplate.sql);
+    }
+
+    @Test
+    void typedQueueListsSelectListOverloads() throws Exception {
+        var jdbc = new CapturingJdbcTemplate();
+        var template = new PgmqTemplate(jdbc, objectMapper);
+        List<Payload> payloads = List.of(new Payload(1, "created"), new Payload(2, "updated"));
+        Map<String, String> shared = Map.of("source", "test");
+        List<Map<String, String>> perMessage = List.of(shared, shared);
+        var at = OffsetDateTime.parse("2026-07-04T00:00:00Z");
+        var sends = List.<Runnable>of(
+                () -> template.sendBatch("queue", payloads),
+                () -> template.sendBatch("queue", payloads, shared),
+                () -> template.sendBatch("queue", payloads, perMessage),
+                () -> template.sendBatch("queue", payloads, 3),
+                () -> template.sendBatch("queue", payloads, at),
+                () -> template.sendBatch("queue", payloads, shared, 3),
+                () -> template.sendBatch("queue", payloads, shared, at),
+                () -> template.sendBatch("queue", payloads, perMessage, 3),
+                () -> template.sendBatch("queue", payloads, perMessage, at),
+                () -> template.sendBatch("queue", payloads.get(0), payloads.get(1)));
+        for (var send : sends) {
+            send.run();
+            assertPayloadArray(payloads, jdbc.args);
+        }
+    }
+
+    @Test
+    void typedTopicListsSelectListOverloads() throws Exception {
+        var jdbc = new CapturingJdbcTemplate();
+        var template = new PgmqTemplate(jdbc, objectMapper);
+        List<Payload> payloads = List.of(new Payload(1, "created"), new Payload(2, "updated"));
+        Map<String, String> shared = Map.of("source", "test");
+        List<Map<String, String>> perMessage = List.of(shared, shared);
+        var at = OffsetDateTime.parse("2026-07-04T00:00:00Z");
+        var sends = List.<Runnable>of(
+                () -> template.sendBatchTopic("events.created", payloads),
+                () -> template.sendBatchTopic("events.created", payloads, shared),
+                () -> template.sendBatchTopic("events.created", payloads, perMessage),
+                () -> template.sendBatchTopic("events.created", payloads, 3),
+                () -> template.sendBatchTopic("events.created", payloads, at),
+                () -> template.sendBatchTopic("events.created", payloads, shared, 3),
+                () -> template.sendBatchTopic("events.created", payloads, shared, at),
+                () -> template.sendBatchTopic("events.created", payloads, perMessage, 3),
+                () -> template.sendBatchTopic("events.created", payloads, perMessage, at),
+                () -> template.sendBatchTopic("events.created", payloads.get(0), payloads.get(1)));
+        for (var send : sends) {
+            send.run();
+            assertPayloadArray(payloads, jdbc.args);
+        }
+    }
+
+    @Test
+    void singleSendsAcceptTypedHeaderMaps() throws Exception {
+        var jdbc = new CapturingJdbcTemplate();
+        var template = new PgmqTemplate(jdbc, objectMapper);
+        Map<String, String> headers = Map.of("source", "typed");
+        var payload = new Payload(1, "created");
+        var at = OffsetDateTime.parse("2026-07-04T00:00:00Z");
+        var sends = List.<Runnable>of(
+                () -> template.send("queue", payload, headers),
+                () -> template.send("queue", payload, headers, 3),
+                () -> template.send("queue", payload, headers, at),
+                () -> template.sendTopic("events.created", payload, headers),
+                () -> template.sendTopic("events.created", payload, headers, 3));
+        for (var send : sends) {
+            send.run();
+            Map<?, ?> encoded = objectMapper.readValue((String) jdbc.args[2], Map.class);
+            assertEquals("typed", encoded.get("source"));
+            assertEquals(Payload.class.getName(), encoded.get(PgmqTemplate.TYPE_HEADER));
+        }
+        assertEquals(Map.of("source", "typed"), headers);
+    }
+
+    @Test
+    void sharedHeaderNullsAreRejectedByTheCommonBatchBoundary() {
+        var jdbc = new CapturingJdbcTemplate();
+        var template = new PgmqTemplate(jdbc, objectMapper);
+        Map<String, String> headers = null;
+        List<Payload> payloads = List.of(new Payload(1, "created"));
+        var at = OffsetDateTime.parse("2026-07-04T00:00:00Z");
+        var sends = List.<Runnable>of(
+                () -> template.sendBatch("queue", payloads, headers),
+                () -> template.sendBatch("queue", payloads, headers, 1),
+                () -> template.sendBatch("queue", payloads, headers, at),
+                () -> template.sendBatchTopic("events.created", payloads, headers),
+                () -> template.sendBatchTopic("events.created", payloads, headers, 1),
+                () -> template.sendBatchTopic("events.created", payloads, headers, at));
+        for (var send : sends) {
+            assertThrows(IllegalArgumentException.class, send::run);
+            assertNull(jdbc.sql);
+        }
+    }
+
+    @Test
+    void serializationFailureDoesNotExecuteSql() {
+        var jdbc = new CapturingJdbcTemplate();
+        var template = new PgmqTemplate(jdbc, objectMapper);
+        var cyclic = new CyclicPayload();
+        var sends = List.<Runnable>of(
+                () -> template.send("queue", cyclic),
+                () -> template.sendBatch("queue", List.of(cyclic)),
+                () -> template.sendTopic("events.created", cyclic),
+                () -> template.sendBatchTopic("events.created", List.of(cyclic)));
+        for (var send : sends) {
+            var error = assertThrows(PgmqException.class, send::run);
+            assertTrue(error.getMessage().contains("failed to convert object to json"));
+            assertNull(jdbc.sql);
+        }
+    }
+
+    public static class CyclicPayload {
+        public CyclicPayload self = this;
+    }
+
+    private void assertPayloadArray(List<Payload> expected, Object[] args) throws Exception {
+        String[] messages = (String[]) args[1];
+        String[] headers = (String[]) args[2];
+        assertEquals(expected.size(), messages.length);
+        assertEquals(expected.size(), headers.length);
+        for (int i = 0; i < expected.size(); i++) {
+            assertEquals(expected.get(i), objectMapper.readValue(messages[i], Payload.class));
+            assertEquals(Payload.class.getName(), objectMapper.readValue(headers[i], Map.class).get(PgmqTemplate.TYPE_HEADER));
+        }
     }
 
     @Test

@@ -1,5 +1,6 @@
 package io.github.idoly.pgmq.listener.adapter;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -8,6 +9,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.util.Map;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.aop.framework.ProxyFactory;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -97,6 +100,86 @@ class MethodPgmqMessageListenerAdapterTest {
         IllegalStateException exception =
                 assertThrows(IllegalStateException.class, () -> adapter.onMessage(message, new TestAcknowledgment()));
         assertEquals("failed", exception.getMessage());
+    }
+
+    @Test
+    void rejectsAsyncReturnValuesBeforeInvocation() throws Exception {
+        var template = new PgmqTemplate(new JdbcTemplate(), new ObjectMapper());
+        var handler = new FutureHandler();
+        var error = assertThrows(IllegalArgumentException.class, () -> new MethodPgmqMessageListenerAdapter(
+                template, handler, FutureHandler.class.getDeclaredMethod("handle", String.class)));
+        assertTrue(error.getMessage().contains("must return void"));
+        assertFalse(handler.invoked);
+    }
+
+    @Test
+    void rejectsMethodClassMetaAndTargetAsyncAnnotations() throws Exception {
+        var template = new PgmqTemplate(new JdbcTemplate(), new ObjectMapper());
+        var proxyFactory = new ProxyFactory(new AsyncImplementation());
+        proxyFactory.setInterfaces(AsyncContract.class);
+        var interfaceProxyFactory = new ProxyFactory(new InterfaceAsyncImplementation());
+        interfaceProxyFactory.setInterfaces(InterfaceAsyncContract.class);
+        var cases = java.util.List.of(
+                new MethodTarget(new MethodAsyncHandler(), MethodAsyncHandler.class.getDeclaredMethod("handle", String.class)),
+                new MethodTarget(new ClassAsyncHandler(), ClassAsyncHandler.class.getDeclaredMethod("handle", String.class)),
+                new MethodTarget(new MetaAsyncHandler(), MetaAsyncHandler.class.getDeclaredMethod("handle", String.class)),
+                new MethodTarget(proxyFactory.getProxy(), AsyncContract.class.getMethod("handle", String.class)),
+                new MethodTarget(interfaceProxyFactory.getProxy(), InterfaceAsyncContract.class.getMethod("handle", String.class)));
+        for (var candidate : cases) {
+            var error = assertThrows(IllegalArgumentException.class, () -> new MethodPgmqMessageListenerAdapter(
+                    template, candidate.bean(), candidate.method()));
+            assertTrue(error.getMessage().contains("@Async"));
+        }
+    }
+
+    private record MethodTarget(Object bean, java.lang.reflect.Method method) {}
+
+    private static class FutureHandler {
+        boolean invoked;
+        public java.util.concurrent.CompletableFuture<Void> handle(String payload) {
+            invoked = true;
+            return new java.util.concurrent.CompletableFuture<>();
+        }
+    }
+
+    private static class MethodAsyncHandler {
+        @Async
+        void handle(String payload) {}
+    }
+
+    @Async
+    private static class ClassAsyncHandler {
+        void handle(String payload) {}
+    }
+
+    @java.lang.annotation.Retention(java.lang.annotation.RetentionPolicy.RUNTIME)
+    @java.lang.annotation.Target(java.lang.annotation.ElementType.METHOD)
+    @Async
+    private @interface Background {}
+
+    private static class MetaAsyncHandler {
+        @Background
+        void handle(String payload) {}
+    }
+
+    public interface AsyncContract {
+        void handle(String payload);
+    }
+
+    private static class AsyncImplementation implements AsyncContract {
+        @Async
+        @Override
+        public void handle(String payload) {}
+    }
+
+    public interface InterfaceAsyncContract {
+        @Async
+        void handle(String payload);
+    }
+
+    private static class InterfaceAsyncImplementation implements InterfaceAsyncContract {
+        @Override
+        public void handle(String payload) {}
     }
 
     public record Payload(int id, String event) {}

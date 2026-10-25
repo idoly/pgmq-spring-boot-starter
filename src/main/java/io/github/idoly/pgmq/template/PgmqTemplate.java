@@ -37,7 +37,8 @@ import io.github.idoly.pgmq.topic.TopicRoute;
  * Payloads and headers are serialized with {@link ObjectMapper}.</p>
  *
  * <p>Messages sent through this template include a {@value #TYPE_HEADER} header
- * so listener arguments can be deserialized with type information.</p>
+ * so listener arguments can be deserialized with type information. If that hint cannot be used,
+ * reads retain generic JSON values and listeners convert them to their declared parameter types.</p>
  *
  * <p>A long-poll duration of zero performs one immediate read without waiting.</p>
  */
@@ -155,13 +156,13 @@ public class PgmqTemplate {
      * @return read messages
      */
     public List<PgmqMessage> readWithPoll(@NonNull String queue, int vt, int qty, int maxPollSeconds, int pollIntervalMs, @NonNull String conditional) {
-        validateReadArguments(queue, vt, qty);
         validateMaxPollSeconds(maxPollSeconds);
         validatePollInterval(pollIntervalMs);
-        Assert.hasText(conditional, "Conditional must not be empty");
         if (maxPollSeconds == 0) {
             return read(queue, vt, qty, conditional);
         }
+        validateReadArguments(queue, vt, qty);
+        Assert.hasText(conditional, "Conditional must not be empty");
         String sql = "select * from pgmq.read_with_poll(?, ?, ?, ?, ?, ?::jsonb)";
         return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty, maxPollSeconds, pollIntervalMs, conditional);
     }
@@ -176,11 +177,11 @@ public class PgmqTemplate {
      * @return read messages
      */
     public List<PgmqMessage> readWithPoll(@NonNull String queue, int vt, int qty, int maxPollSeconds) {
-        validateReadArguments(queue, vt, qty);
         validateMaxPollSeconds(maxPollSeconds);
         if (maxPollSeconds == 0) {
             return read(queue, vt, qty);
         }
+        validateReadArguments(queue, vt, qty);
         String sql = "select * from pgmq.read_with_poll(?, ?, ?, ?)";
         return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty, maxPollSeconds);
     }
@@ -196,12 +197,12 @@ public class PgmqTemplate {
      * @return read messages
      */
     public List<PgmqMessage> readWithPoll(@NonNull String queue, int vt, int qty, int maxPollSeconds, int pollIntervalMs) {
-        validateReadArguments(queue, vt, qty);
         validateMaxPollSeconds(maxPollSeconds);
         validatePollInterval(pollIntervalMs);
         if (maxPollSeconds == 0) {
             return read(queue, vt, qty);
         }
+        validateReadArguments(queue, vt, qty);
         String sql = "select * from pgmq.read_with_poll(?, ?, ?, ?, ?)";
         return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty, maxPollSeconds, pollIntervalMs);
     }
@@ -245,12 +246,12 @@ public class PgmqTemplate {
      * @return read messages
      */
     public List<PgmqMessage> readGroupedWithPoll(@NonNull String queue, int vt, int qty, int maxPollSeconds, int pollIntervalMs) {
-        validateReadArguments(queue, vt, qty);
         validateMaxPollSeconds(maxPollSeconds);
         validatePollInterval(pollIntervalMs);
         if (maxPollSeconds == 0) {
             return readGrouped(queue, vt, qty);
         }
+        validateReadArguments(queue, vt, qty);
         String sql = "select * from pgmq.read_grouped_with_poll(?, ?, ?, ?, ?)";
         return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty, maxPollSeconds, pollIntervalMs);
     }
@@ -265,11 +266,11 @@ public class PgmqTemplate {
      * @return read messages
      */
     public List<PgmqMessage> readGroupedWithPoll(@NonNull String queue, int vt, int qty, int maxPollSeconds) {
-        validateReadArguments(queue, vt, qty);
         validateMaxPollSeconds(maxPollSeconds);
         if (maxPollSeconds == 0) {
             return readGrouped(queue, vt, qty);
         }
+        validateReadArguments(queue, vt, qty);
         String sql = "select * from pgmq.read_grouped_with_poll(?, ?, ?, ?)";
         return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty, maxPollSeconds);
     }
@@ -313,12 +314,12 @@ public class PgmqTemplate {
      * @return read messages
      */
     public List<PgmqMessage> readGroupedRoundRobinWithPoll(@NonNull String queue, int vt, int qty, int maxPollSeconds, int pollIntervalMs) {
-        validateReadArguments(queue, vt, qty);
         validateMaxPollSeconds(maxPollSeconds);
         validatePollInterval(pollIntervalMs);
         if (maxPollSeconds == 0) {
             return readGroupedRoundRobin(queue, vt, qty);
         }
+        validateReadArguments(queue, vt, qty);
         String sql = "select * from pgmq.read_grouped_rr_with_poll(?, ?, ?, ?, ?)";
         return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty, maxPollSeconds, pollIntervalMs);
     }
@@ -362,12 +363,12 @@ public class PgmqTemplate {
      * @return read messages
      */
     public List<PgmqMessage> readGroupedHeadWithPoll(@NonNull String queue, int vt, int qty, int maxPollSeconds, int pollIntervalMs) {
-        validateReadArguments(queue, vt, qty);
         validateMaxPollSeconds(maxPollSeconds);
         validatePollInterval(pollIntervalMs);
         if (maxPollSeconds == 0) {
             return readGroupedHead(queue, vt, qty);
         }
+        validateReadArguments(queue, vt, qty);
         String sql = "select * from pgmq.read_grouped_head_with_poll(?, ?, ?, ?, ?)";
         return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty, maxPollSeconds, pollIntervalMs);
     }
@@ -382,11 +383,11 @@ public class PgmqTemplate {
      * @return read messages
      */
     public List<PgmqMessage> readGroupedRoundRobinWithPoll(@NonNull String queue, int vt, int qty, int maxPollSeconds) {
-        validateReadArguments(queue, vt, qty);
         validateMaxPollSeconds(maxPollSeconds);
         if (maxPollSeconds == 0) {
             return readGroupedRoundRobin(queue, vt, qty);
         }
+        validateReadArguments(queue, vt, qty);
         String sql = "select * from pgmq.read_grouped_rr_with_poll(?, ?, ?, ?)";
         return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty, maxPollSeconds);
     }
@@ -401,11 +402,11 @@ public class PgmqTemplate {
      * @return read messages
      */
     public List<PgmqMessage> readGroupedHeadWithPoll(@NonNull String queue, int vt, int qty, int maxPollSeconds) {
-        validateReadArguments(queue, vt, qty);
         validateMaxPollSeconds(maxPollSeconds);
         if (maxPollSeconds == 0) {
             return readGroupedHead(queue, vt, qty);
         }
+        validateReadArguments(queue, vt, qty);
         String sql = "select * from pgmq.read_grouped_head_with_poll(?, ?, ?, ?)";
         return jdbcTemplate.query(sql, new MessageRecordMapper(), queue, vt, qty, maxPollSeconds);
     }
@@ -485,7 +486,7 @@ public class PgmqTemplate {
      * @param headers custom headers
      * @return inserted message ID
      */
-    public long send(@NonNull String queue, @NonNull Object msg, @NonNull Map<String, Object> headers) {
+    public long send(@NonNull String queue, @NonNull Object msg, @NonNull Map<String, ?> headers) {
         return send(queue, msg, headers, 0);
     }
 
@@ -522,7 +523,7 @@ public class PgmqTemplate {
      * @param delay delay in seconds before visibility
      * @return inserted message ID
      */
-    public long send(@NonNull String queue, @NonNull Object msg, @NonNull Map<String, Object> headers, int delay) {
+    public long send(@NonNull String queue, @NonNull Object msg, @NonNull Map<String, ?> headers, int delay) {
         validateDelay(delay);
         return sendInternal(queue, msg, headers, delay);
     }
@@ -539,13 +540,13 @@ public class PgmqTemplate {
      * @param visibleAt timestamp when the message becomes visible
      * @return inserted message ID
      */
-    public long send(@NonNull String queue, @NonNull Object msg, @NonNull Map<String, Object> headers,
+    public long send(@NonNull String queue, @NonNull Object msg, @NonNull Map<String, ?> headers,
             @NonNull OffsetDateTime visibleAt) {
         Assert.notNull(visibleAt, "Visibility timestamp must not be null");
         return sendInternal(queue, msg, headers, visibleAt);
     }
 
-    private long sendInternal(String queue, Object msg, Map<String, Object> headers, Object visibilityValue) {
+    private long sendInternal(String queue, Object msg, Map<String, ?> headers, Object visibilityValue) {
         validateQueueNameArgument(queue);
         validateMessage(msg);
         validateHeaders(headers);
@@ -575,7 +576,7 @@ public class PgmqTemplate {
      * @param msgs message payloads
      * @return inserted message IDs
      */
-    public List<Long> sendBatch(@NonNull String queue, @NonNull List<Object> msgs) {
+    public List<Long> sendBatch(@NonNull String queue, @NonNull List<?> msgs) {
         return sendBatch(queue, msgs, List.of());
     }
 
@@ -587,9 +588,8 @@ public class PgmqTemplate {
      * @param headers shared headers
      * @return inserted message IDs
      */
-    public List<Long> sendBatch(@NonNull String queue, @NonNull List<Object> msgs, @NonNull Map<String, Object> headers) {
-        Assert.notNull(headers, "Headers must not be null");
-        return sendBatch(queue, msgs, List.of(headers));
+    public List<Long> sendBatch(@NonNull String queue, @NonNull List<?> msgs, @NonNull Map<String, ?> headers) {
+        return sendBatch(queue, msgs, Collections.singletonList(headers));
     }
 
     /**
@@ -601,10 +601,9 @@ public class PgmqTemplate {
      * @param delay delay in seconds
      * @return inserted message IDs
      */
-    public List<Long> sendBatch(@NonNull String queue, @NonNull List<Object> msgs,
-            @NonNull Map<String, Object> headers, int delay) {
-        Assert.notNull(headers, "Headers must not be null");
-        return sendBatch(queue, msgs, List.of(headers), delay);
+    public List<Long> sendBatch(@NonNull String queue, @NonNull List<?> msgs,
+            @NonNull Map<String, ?> headers, int delay) {
+        return sendBatch(queue, msgs, Collections.singletonList(headers), delay);
     }
 
     /**
@@ -616,10 +615,9 @@ public class PgmqTemplate {
      * @param visibleAt timestamp when messages become visible
      * @return inserted message IDs
      */
-    public List<Long> sendBatch(@NonNull String queue, @NonNull List<Object> msgs,
-            @NonNull Map<String, Object> headers, @NonNull OffsetDateTime visibleAt) {
-        Assert.notNull(headers, "Headers must not be null");
-        return sendBatch(queue, msgs, List.of(headers), visibleAt);
+    public List<Long> sendBatch(@NonNull String queue, @NonNull List<?> msgs,
+            @NonNull Map<String, ?> headers, @NonNull OffsetDateTime visibleAt) {
+        return sendBatch(queue, msgs, Collections.singletonList(headers), visibleAt);
     }
 
     /**
@@ -630,7 +628,7 @@ public class PgmqTemplate {
      * @param headers shared or per-message headers
      * @return inserted message IDs
      */
-    public List<Long> sendBatch(@NonNull String queue, @NonNull List<Object> msgs, @NonNull List<Map<String, Object>> headers) {
+    public List<Long> sendBatch(@NonNull String queue, @NonNull List<?> msgs, @NonNull List<? extends Map<String, ?>> headers) {
         return sendBatch(queue, msgs, headers, 0);
     }
 
@@ -642,7 +640,7 @@ public class PgmqTemplate {
      * @param delay delay in seconds before visibility
      * @return inserted message IDs
      */
-    public List<Long> sendBatch(@NonNull String queue, @NonNull List<Object> msgs, int delay) {
+    public List<Long> sendBatch(@NonNull String queue, @NonNull List<?> msgs, int delay) {
         return sendBatch(queue, msgs, List.of(), delay);
     }
 
@@ -654,7 +652,7 @@ public class PgmqTemplate {
      * @param visibleAt timestamp when messages become visible
      * @return inserted message IDs
      */
-    public List<Long> sendBatch(@NonNull String queue, @NonNull List<Object> msgs,
+    public List<Long> sendBatch(@NonNull String queue, @NonNull List<?> msgs,
             @NonNull OffsetDateTime visibleAt) {
         return sendBatch(queue, msgs, List.of(), visibleAt);
     }
@@ -669,7 +667,7 @@ public class PgmqTemplate {
      * @return inserted message IDs
      * @throws PgmqException if {@code headers} contains more than one element and its size does not match {@code msgs}
      */
-    public List<Long> sendBatch(@NonNull String queue, @NonNull List<Object> msgs, @NonNull List<Map<String, Object>> headers, int delay) {
+    public List<Long> sendBatch(@NonNull String queue, @NonNull List<?> msgs, @NonNull List<? extends Map<String, ?>> headers, int delay) {
         validateDelay(delay);
         return sendBatchInternal(queue, msgs, headers, delay);
     }
@@ -688,14 +686,14 @@ public class PgmqTemplate {
      * @return inserted message IDs
      * @throws PgmqException if {@code headers} contains more than one element and its size does not match {@code msgs}
      */
-    public List<Long> sendBatch(@NonNull String queue, @NonNull List<Object> msgs,
-            @NonNull List<Map<String, Object>> headers, @NonNull OffsetDateTime visibleAt) {
+    public List<Long> sendBatch(@NonNull String queue, @NonNull List<?> msgs,
+            @NonNull List<? extends Map<String, ?>> headers, @NonNull OffsetDateTime visibleAt) {
         Assert.notNull(visibleAt, "Visibility timestamp must not be null");
         return sendBatchInternal(queue, msgs, headers, visibleAt);
     }
 
-    private List<Long> sendBatchInternal(String queue, List<Object> msgs,
-            List<Map<String, Object>> headers, Object visibilityValue) {
+    private List<Long> sendBatchInternal(String queue, List<?> msgs,
+            List<? extends Map<String, ?>> headers, Object visibilityValue) {
         validateQueueNameArgument(queue);
         validateMessages(msgs);
         validateHeaderList(headers);
@@ -1295,7 +1293,7 @@ public class PgmqTemplate {
      * @param headers custom headers
      * @return number of matched queues
      */
-    public int sendTopic(@NonNull String routingKey, @NonNull Object msg, @NonNull Map<String, Object> headers) {
+    public int sendTopic(@NonNull String routingKey, @NonNull Object msg, @NonNull Map<String, ?> headers) {
         return sendTopic(routingKey, msg, headers, 0);
     }
 
@@ -1311,7 +1309,7 @@ public class PgmqTemplate {
      * @param delay delay in seconds before visibility
      * @return number of matched queues
      */
-    public int sendTopic(@NonNull String routingKey, @NonNull Object msg, @NonNull Map<String, Object> headers, int delay) {
+    public int sendTopic(@NonNull String routingKey, @NonNull Object msg, @NonNull Map<String, ?> headers, int delay) {
         validateRoutingKeyArgument(routingKey);
         validateMessage(msg);
         validateHeaders(headers);
@@ -1364,7 +1362,7 @@ public class PgmqTemplate {
      * @param msgs message payloads
      * @return inserted message IDs with queue names
      */
-    public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<Object> msgs) {
+    public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<?> msgs) {
         return sendBatchTopic(routingKey, msgs, List.of());
     }
 
@@ -1376,9 +1374,8 @@ public class PgmqTemplate {
      * @param headers shared headers
      * @return inserted message IDs with queue names
      */
-    public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<Object> msgs, @NonNull Map<String, Object> headers) {
-        Assert.notNull(headers, "Headers must not be null");
-        return sendBatchTopic(routingKey, msgs, List.of(headers));
+    public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<?> msgs, @NonNull Map<String, ?> headers) {
+        return sendBatchTopic(routingKey, msgs, Collections.singletonList(headers));
     }
 
     /**
@@ -1390,10 +1387,9 @@ public class PgmqTemplate {
      * @param delay delay in seconds
      * @return inserted message IDs with queue names
      */
-    public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<Object> msgs,
-            @NonNull Map<String, Object> headers, int delay) {
-        Assert.notNull(headers, "Headers must not be null");
-        return sendBatchTopic(routingKey, msgs, List.of(headers), delay);
+    public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<?> msgs,
+            @NonNull Map<String, ?> headers, int delay) {
+        return sendBatchTopic(routingKey, msgs, Collections.singletonList(headers), delay);
     }
 
     /**
@@ -1405,10 +1401,9 @@ public class PgmqTemplate {
      * @param visibleAt timestamp when messages become visible
      * @return inserted message IDs with queue names
      */
-    public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<Object> msgs,
-            @NonNull Map<String, Object> headers, @NonNull OffsetDateTime visibleAt) {
-        Assert.notNull(headers, "Headers must not be null");
-        return sendBatchTopic(routingKey, msgs, List.of(headers), visibleAt);
+    public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<?> msgs,
+            @NonNull Map<String, ?> headers, @NonNull OffsetDateTime visibleAt) {
+        return sendBatchTopic(routingKey, msgs, Collections.singletonList(headers), visibleAt);
     }
 
     /**
@@ -1419,7 +1414,7 @@ public class PgmqTemplate {
      * @param headers shared or per-message headers
      * @return inserted message IDs with queue names
      */
-    public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<Object> msgs, @NonNull List<Map<String, Object>> headers) {
+    public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<?> msgs, @NonNull List<? extends Map<String, ?>> headers) {
         return sendBatchTopic(routingKey, msgs, headers, 0);
     }
 
@@ -1431,7 +1426,7 @@ public class PgmqTemplate {
      * @param delay delay in seconds before visibility
      * @return inserted message IDs with queue names
      */
-    public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<Object> msgs, int delay) {
+    public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<?> msgs, int delay) {
         return sendBatchTopic(routingKey, msgs, List.of(), delay);
     }
 
@@ -1443,7 +1438,7 @@ public class PgmqTemplate {
      * @param visibleAt timestamp when messages become visible
      * @return inserted message IDs with queue names
      */
-    public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<Object> msgs,
+    public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<?> msgs,
             @NonNull OffsetDateTime visibleAt) {
         return sendBatchTopic(routingKey, msgs, List.of(), visibleAt);
     }
@@ -1458,7 +1453,7 @@ public class PgmqTemplate {
      * @return inserted message IDs with queue names
      * @throws PgmqException if {@code headers} contains more than one element and its size does not match {@code msgs}
      */
-    public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<Object> msgs, @NonNull List<Map<String, Object>> headers, int delay) {
+    public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<?> msgs, @NonNull List<? extends Map<String, ?>> headers, int delay) {
         validateDelay(delay);
         return sendBatchTopicInternal(routingKey, msgs, headers, delay);
     }
@@ -1477,14 +1472,14 @@ public class PgmqTemplate {
      * @return inserted message IDs with queue names
      * @throws PgmqException if {@code headers} contains more than one element and its size does not match {@code msgs}
      */
-    public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<Object> msgs,
-            @NonNull List<Map<String, Object>> headers, @NonNull OffsetDateTime visibleAt) {
+    public List<TopicBatchResult> sendBatchTopic(@NonNull String routingKey, @NonNull List<?> msgs,
+            @NonNull List<? extends Map<String, ?>> headers, @NonNull OffsetDateTime visibleAt) {
         Assert.notNull(visibleAt, "Visibility timestamp must not be null");
         return sendBatchTopicInternal(routingKey, msgs, headers, visibleAt);
     }
 
-    private List<TopicBatchResult> sendBatchTopicInternal(String routingKey, List<Object> msgs,
-            List<Map<String, Object>> headers, Object visibilityValue) {
+    private List<TopicBatchResult> sendBatchTopicInternal(String routingKey, List<?> msgs,
+            List<? extends Map<String, ?>> headers, Object visibilityValue) {
         validateRoutingKeyArgument(routingKey);
         validateMessages(msgs);
         validateHeaderList(headers);
@@ -1586,7 +1581,7 @@ public class PgmqTemplate {
     /**
      * Validate message batch arguments.
      */
-    private static void validateMessages(List<Object> msgs) {
+    private static void validateMessages(List<?> msgs) {
         Assert.notEmpty(msgs, "Messages must not be empty");
         for (Object msg : msgs) {
             validateMessage(msg);
@@ -1596,7 +1591,7 @@ public class PgmqTemplate {
     /**
      * Validate one header map.
      */
-    private static void validateHeaders(Map<String, Object> headers) {
+    private static void validateHeaders(Map<String, ?> headers) {
         Assert.notNull(headers, "Headers must not be null");
         for (String headerName : headers.keySet()) {
             Assert.hasText(headerName, "Header name must not be empty");
@@ -1606,9 +1601,9 @@ public class PgmqTemplate {
     /**
      * Validate batch header arguments.
      */
-    private static void validateHeaderList(List<Map<String, Object>> headers) {
+    private static void validateHeaderList(List<? extends Map<String, ?>> headers) {
         Assert.notNull(headers, "Headers must not be null");
-        for (Map<String, Object> header : headers) {
+        for (Map<String, ?> header : headers) {
             validateHeaders(header);
         }
     }
@@ -1780,13 +1775,13 @@ public class PgmqTemplate {
          */
         private Object payload(ResultSet rs, Map<String, Object> headers) throws SQLException {
             String payload = rs.getString("message");
-            if (payload != null && headers != null && headers.containsKey(TYPE_HEADER)) {
-                String _type = (String) headers.get(TYPE_HEADER);
+            if (payload != null && headers != null && headers.get(TYPE_HEADER) instanceof String typeName) {
                 try {
-                    JavaType javaType = objectMapper.getTypeFactory().constructFromCanonical(_type);
+                    JavaType javaType = objectMapper.getTypeFactory().constructFromCanonical(typeName);
                     return objectMapper.readValue(payload, javaType);
-                } catch (Exception e) {
-                    throw new PgmqException("failed to deserialize message for type: " + _type, e);
+                } catch (Exception ignored) {
+                    // Producer type hints can be stale or incompatible. Keep the JSON value so
+                    // the listener's parameter conversion can fail at the per-message boundary.
                 }
             }
 
@@ -1843,7 +1838,7 @@ public class PgmqTemplate {
     /**
      * Copy caller headers and add the payload type header.
      */
-    private Map<String, Object> messageHeaders(Object msg, Map<String, Object> headers) {
+    private Map<String, Object> messageHeaders(Object msg, Map<String, ?> headers) {
         Map<String, Object> messageHeaders = new HashMap<>(headers);
         messageHeaders.put(TYPE_HEADER, objectMapper.constructType(msg.getClass()).toCanonical());
         return messageHeaders;
@@ -1852,8 +1847,8 @@ public class PgmqTemplate {
     /**
      * Build one enriched header map per batch message.
      */
-    private List<Map<String, Object>> messageHeaders(List<Object> msgs, List<Map<String, Object>> headers) {
-        List<Map<String, Object>> expandedHeaders = expandHeaders(msgs, headers);
+    private List<Map<String, Object>> messageHeaders(List<?> msgs, List<? extends Map<String, ?>> headers) {
+        List<? extends Map<String, ?>> expandedHeaders = expandHeaders(msgs, headers);
         return IntStream.range(0, msgs.size())
                 .mapToObj(index -> messageHeaders(msgs.get(index), expandedHeaders.get(index)))
                 .toList();
@@ -1862,9 +1857,9 @@ public class PgmqTemplate {
     /**
      * Expand empty or single-entry headers into one logical header map per message.
      */
-    private List<Map<String, Object>> expandHeaders(List<Object> msgs, List<Map<String, Object>> headers) {
+    private List<? extends Map<String, ?>> expandHeaders(List<?> msgs, List<? extends Map<String, ?>> headers) {
         if (headers.size() <= 1) {
-            Map<String, Object> sharedHeaders = headers.isEmpty() ? Map.of() : headers.get(0);
+            Map<String, ?> sharedHeaders = headers.isEmpty() ? Map.of() : headers.get(0);
             return Collections.nCopies(msgs.size(), sharedHeaders);
         }
 

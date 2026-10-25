@@ -22,7 +22,7 @@ import org.springframework.boot.SpringBootConfiguration;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Bean;
-import org.testcontainers.junit.jupiter.Testcontainers;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 import io.github.idoly.pgmq.annotation.PgmqHeader;
 import io.github.idoly.pgmq.annotation.PgmqListener;
@@ -31,7 +31,7 @@ import io.github.idoly.pgmq.config.PgmqInitializer;
 import io.github.idoly.pgmq.listener.container.PgmqListenerContainer;
 import io.github.idoly.pgmq.listener.endpoint.PgmqListenerEndpointRegistry;
 import io.github.idoly.pgmq.template.PgmqTemplate;
-import io.github.idoly.pgmq.testsupport.PostgresPartmanContainerSupport;
+import io.github.idoly.pgmq.testsupport.PostgresIntegrationSupport;
 
 @SpringBootTest(
         classes = PgmqListenerIntegrationTest.TestApplication.class,
@@ -40,9 +40,9 @@ import io.github.idoly.pgmq.testsupport.PostgresPartmanContainerSupport;
                 "pgmq.listener.max-poll-seconds=1",
                 "pgmq.listener.poll-interval-ms=50"
         })
-@Testcontainers(disabledWithoutDocker = true)
+@EnabledIfEnvironmentVariable(named = "PGMQ_TEST_JDBC_URL", matches = ".+")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-class PgmqListenerIntegrationTest extends PostgresPartmanContainerSupport {
+class PgmqListenerIntegrationTest extends PostgresIntegrationSupport {
 
     private static final String LISTENER_ID = "listener-e2e";
 

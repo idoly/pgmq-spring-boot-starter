@@ -25,8 +25,8 @@ import io.github.idoly.pgmq.listener.container.PgmqListenerContainerFactory;
 /**
  * Detects {@link PgmqListener} methods and registers listener endpoints.
  *
- * <p>Collects annotated methods after bean initialization and creates listener
- * containers once all singletons are available.</p>
+ * <p>Collects annotated methods during singleton initialization, then registers later-created
+ * listener beans immediately through the same registry.</p>
  */
 public class PgmqListenerAnnotationBeanPostProcessor implements BeanPostProcessor, SmartInitializingSingleton,
         ApplicationContextAware {
@@ -36,6 +36,10 @@ public class PgmqListenerAnnotationBeanPostProcessor implements BeanPostProcesso
 
     /** Listener method metadata collected during bean post-processing. */
     private final List<Metadata> metadatas = new ArrayList<>();
+
+    /** Registration phase and default-id sequence, guarded by the metadata list monitor. */
+    private boolean initialized;
+    private int nextEndpointIndex;
 
     /** Application context used to resolve factories, registry, and placeholders. */
     private ApplicationContext applicationContext;
@@ -58,10 +62,24 @@ public class PgmqListenerAnnotationBeanPostProcessor implements BeanPostProcesso
         Map<Method, PgmqListener> annotatedMethods = MethodIntrospector.selectMethods(targetClass,
                 (Method method) -> AnnotatedElementUtils.findMergedAnnotation(method, PgmqListener.class));
 
+        if (!annotatedMethods.isEmpty()) {
+            Assert.state(applicationContext.isSingleton(beanName), "PGMQ listener beans must be singletons");
+        }
         annotatedMethods.forEach((method, annotation) -> {
             Method invocableMethod = AopUtils.selectInvocableMethod(method, bean.getClass());
             ReflectionUtils.makeAccessible(invocableMethod);
-            metadatas.add(new Metadata(beanName, bean, invocableMethod, annotation));
+            Metadata metadata;
+            boolean registerNow;
+            synchronized (metadatas) {
+                metadata = new Metadata(beanName, bean, invocableMethod, annotation, nextEndpointIndex++);
+                registerNow = initialized;
+                if (!registerNow) {
+                    metadatas.add(metadata);
+                }
+            }
+            if (registerNow) {
+                registerEndpoint(metadata);
+            }
         });
 
         return bean;
@@ -72,25 +90,27 @@ public class PgmqListenerAnnotationBeanPostProcessor implements BeanPostProcesso
      */
     @Override
     public void afterSingletonsInstantiated() {
-        if (metadatas.isEmpty()) {
-            return;
+        List<Metadata> pending;
+        synchronized (metadatas) {
+            initialized = true;
+            pending = List.copyOf(metadatas);
+            metadatas.clear();
         }
+        pending.forEach(this::registerEndpoint);
+    }
 
+    private void registerEndpoint(Metadata metadata) {
         PgmqListenerEndpointRegistry registry = applicationContext.getBean(PgmqListenerEndpointRegistry.class);
-        for (int i = 0; i < metadatas.size(); i++) {
-            Metadata metadata = metadatas.get(i);
-            MethodPgmqListenerEndpoint endpoint = createEndpoint(metadata, i);
-            registry.registerListenerContainer(endpoint, resolveFactory(metadata.annotation()));
-        }
+        registry.registerListenerContainer(createEndpoint(metadata), resolveFactory(metadata.annotation()));
     }
 
     /**
      * Create an endpoint from collected listener metadata.
      */
-    private MethodPgmqListenerEndpoint createEndpoint(Metadata metadata, int index) {
+    private MethodPgmqListenerEndpoint createEndpoint(Metadata metadata) {
         PgmqListener annotation = metadata.annotation();
         String queue = resolveRequired(annotation.value(), "@PgmqListener value must not be empty");
-        String id = resolveId(annotation.id(), metadata, index);
+        String id = resolveId(annotation.id(), metadata);
 
         return new MethodPgmqListenerEndpoint(id, metadata.bean(), metadata.method(), metadata.beanName(), queue, annotation);
     }
@@ -110,12 +130,12 @@ public class PgmqListenerAnnotationBeanPostProcessor implements BeanPostProcesso
     /**
      * Resolve the endpoint id, falling back to a stable bean-method id.
      */
-    private String resolveId(String configuredId, Metadata metadata, int index) {
+    private String resolveId(String configuredId, Metadata metadata) {
         String id = applicationContext.getEnvironment().resolvePlaceholders(configuredId);
         if (StringUtils.hasText(id)) {
             return id;
         }
-        return metadata.beanName() + "." + metadata.method().getName() + "." + index;
+        return metadata.beanName() + "." + metadata.method().getName() + "." + metadata.index();
     }
 
     /**
@@ -136,6 +156,7 @@ public class PgmqListenerAnnotationBeanPostProcessor implements BeanPostProcesso
      * @param bean listener bean
      * @param method invocable listener method
      * @param annotation source annotation
+     * @param index sequence used by the default listener id
      */
-    private record Metadata(String beanName, Object bean, Method method, PgmqListener annotation) {}
+    private record Metadata(String beanName, Object bean, Method method, PgmqListener annotation, int index) {}
 }

@@ -15,6 +15,9 @@ import io.github.idoly.pgmq.listener.AckMode;
  * method and resolves method arguments from the message payload, headers, message
  * record, or acknowledgement handle.</p>
  *
+ * <p>The default factory requires synchronous {@code void} methods. Asynchronous return types
+ * and {@code @Async} on listener methods or classes are rejected during registration.</p>
+ *
  * <pre>{@code
  * @PgmqListener(value = "myQueue", visibilityTimeout = 60, batchSize = 5, consumerConcurrency = 2)
  * public void handle(MyMessage message) {

@@ -16,22 +16,22 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.SpringBootConfiguration;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.testcontainers.junit.jupiter.Testcontainers;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 import io.github.idoly.pgmq.config.PgmqInitializer;
 import io.github.idoly.pgmq.message.PgmqMessage;
 import io.github.idoly.pgmq.metrics.PgmqMetrics;
 import io.github.idoly.pgmq.notification.NotifyInsertThrottle;
 import io.github.idoly.pgmq.queue.PgmqQueue;
-import io.github.idoly.pgmq.testsupport.PostgresPartmanContainerSupport;
+import io.github.idoly.pgmq.testsupport.PostgresIntegrationSupport;
 import io.github.idoly.pgmq.topic.TopicBatchResult;
 import io.github.idoly.pgmq.topic.TopicBinding;
 import io.github.idoly.pgmq.topic.TopicRoute;
 
 @SpringBootTest(classes = PgmqTemplateTest.TestApplication.class)
-@Testcontainers(disabledWithoutDocker = true)
+@EnabledIfEnvironmentVariable(named = "PGMQ_TEST_JDBC_URL", matches = ".+")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-class PgmqTemplateTest extends PostgresPartmanContainerSupport {
+class PgmqTemplateTest extends PostgresIntegrationSupport {
 
     @SpringBootConfiguration
     @EnableAutoConfiguration
@@ -378,6 +378,12 @@ class PgmqTemplateTest extends PostgresPartmanContainerSupport {
 
     @Test
     void testPartitionedQueueCreation() {
+        boolean available = Boolean.TRUE.equals(pgmqTemplate.getJdbcTemplate().queryForObject(
+                "select exists (select 1 from pg_available_extensions where name = 'pg_partman')", Boolean.class));
+        if (Boolean.parseBoolean(System.getenv("PGMQ_TEST_REQUIRE_PARTMAN"))) {
+            assertTrue(available, "CI PostgreSQL must provide pg_partman");
+        }
+        org.junit.jupiter.api.Assumptions.assumeTrue(available, "pg_partman is not available on this test server");
         String queue = "partitioned_queue";
         pgmqTemplate.getJdbcTemplate().update("create extension if not exists pg_partman");
         assertTrue(pgmqTemplate.isPartmanInstalled());

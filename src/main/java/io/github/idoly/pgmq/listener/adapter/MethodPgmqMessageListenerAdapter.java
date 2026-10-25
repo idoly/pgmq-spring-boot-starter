@@ -8,7 +8,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import org.springframework.aop.framework.AopProxyUtils;
+import org.springframework.aop.support.AopUtils;
 import org.springframework.core.annotation.AnnotatedElementUtils;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.util.Assert;
 import org.springframework.util.ReflectionUtils;
 
@@ -50,6 +53,14 @@ public class MethodPgmqMessageListenerAdapter implements PgmqMessageListener {
         Assert.notNull(pgmqTemplate, "PgmqTemplate must not be null");
         Assert.notNull(bean, "Listener bean must not be null");
         Assert.notNull(method, "Listener method must not be null");
+        Class<?> targetClass = AopProxyUtils.ultimateTargetClass(bean);
+        Method targetMethod = AopUtils.getMostSpecificMethod(method, targetClass);
+        Assert.isTrue(targetMethod.getReturnType() == void.class,
+                "PGMQ listener methods must return void; asynchronous return values are not supported");
+        Assert.isTrue(AnnotatedElementUtils.findMergedAnnotation(method, Async.class) == null
+                        && AnnotatedElementUtils.findMergedAnnotation(targetMethod, Async.class) == null
+                        && AnnotatedElementUtils.findMergedAnnotation(targetClass, Async.class) == null,
+                "@Async is not supported on PGMQ listener methods or classes");
         this.pgmqTemplate = pgmqTemplate;
         this.bean = bean;
         this.method = method;

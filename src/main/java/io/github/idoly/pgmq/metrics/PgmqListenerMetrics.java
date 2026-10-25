@@ -10,28 +10,25 @@ import org.springframework.util.Assert;
 
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.Meter.MeterProvider;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.binder.MeterBinder;
 
 import io.github.idoly.pgmq.listener.container.PgmqListenerContainer;
 
-/**
- * Micrometer metrics for listener polling, processing, and in-flight state.
- */
+/** Micrometer metrics for listener polling, processing, and in-flight state. */
 public class PgmqListenerMetrics implements MeterBinder {
 
     private static final Log logger = LogFactory.getLog(PgmqListenerMetrics.class);
 
-    /**
-     * Create an initially unbound listener metric recorder.
-     */
+    private final CopyOnWriteArrayList<RegistryMeters> registries = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<PgmqListenerContainer> containers = new CopyOnWriteArrayList<>();
+
+    /** Create an initially unbound listener metric recorder. */
     public PgmqListenerMetrics() {
     }
-
-    private final CopyOnWriteArrayList<MeterRegistry> registries = new CopyOnWriteArrayList<>();
-
-    private final CopyOnWriteArrayList<PgmqListenerContainer> containers = new CopyOnWriteArrayList<>();
 
     /**
      * Bind existing and future listener metrics to a registry.
@@ -39,23 +36,37 @@ public class PgmqListenerMetrics implements MeterBinder {
      * @param registry target meter registry
      */
     @Override
-    public void bindTo(MeterRegistry registry) {
+    public synchronized void bindTo(MeterRegistry registry) {
         Assert.notNull(registry, "MeterRegistry must not be null");
-        if (registries.addIfAbsent(registry)) {
+        if (registries.stream().noneMatch(bound -> bound.registry() == registry)) {
+            registries.add(RegistryMeters.create(registry));
             containers.forEach(container -> registerGauges(registry, container));
         }
     }
 
     /**
-     * Register one listener container for state gauges.
+     * Register state gauges, replacing an earlier container with the same listener and queue.
      *
      * @param container listener container
      */
-    public void registerContainer(PgmqListenerContainer container) {
+    public synchronized void registerContainer(PgmqListenerContainer container) {
         Assert.notNull(container, "PgmqListenerContainer must not be null");
-        if (containers.addIfAbsent(container)) {
-            registries.forEach(registry -> registerGauges(registry, container));
+        if (containers.contains(container)) {
+            return;
         }
+        boolean replaced = containers.removeIf(existing -> existing.getId().equals(container.getId())
+                && existing.getQueue().equals(container.getQueue()));
+        containers.add(container);
+        registries.forEach(bound -> {
+            MeterRegistry registry = bound.registry();
+            if (replaced) {
+                registry.find("pgmq.listener.running").tags("listener", container.getId(), "queue", container.getQueue())
+                        .gauges().forEach(registry::remove);
+                registry.find("pgmq.listener.in_flight").tags("listener", container.getId(), "queue", container.getQueue())
+                        .gauges().forEach(registry::remove);
+            }
+            registerGauges(registry, container);
+        });
     }
 
     /**
@@ -67,10 +78,10 @@ public class PgmqListenerMetrics implements MeterBinder {
      * @param result success or error
      */
     public void recordPoll(String listenerId, String queue, long durationNanos, String result) {
-        forEachRegistry(registry -> {
-            counter(registry, "pgmq.listener.polls", listenerId, queue, result).increment();
-            timer(registry, "pgmq.listener.poll.duration", "PGMQ listener poll duration",
-                    listenerId, queue, result).record(durationNanos, TimeUnit.NANOSECONDS);
+        forEachRegistry(bound -> {
+            Tags tags = Tags.of("listener", listenerId, "queue", queue, "result", result);
+            bound.polls().withTags(tags).increment();
+            bound.pollDuration().withTags(tags).record(durationNanos, TimeUnit.NANOSECONDS);
         });
     }
 
@@ -83,10 +94,10 @@ public class PgmqListenerMetrics implements MeterBinder {
      * @param result success or error
      */
     public void recordProcessing(String listenerId, String queue, long durationNanos, String result) {
-        forEachRegistry(registry -> {
-            counter(registry, "pgmq.listener.messages", listenerId, queue, result).increment();
-            timer(registry, "pgmq.listener.processing.duration", "PGMQ listener processing duration",
-                    listenerId, queue, result).record(durationNanos, TimeUnit.NANOSECONDS);
+        forEachRegistry(bound -> {
+            Tags tags = Tags.of("listener", listenerId, "queue", queue, "result", result);
+            bound.messages().withTags(tags).increment();
+            bound.processingDuration().withTags(tags).record(durationNanos, TimeUnit.NANOSECONDS);
         });
     }
 
@@ -101,27 +112,27 @@ public class PgmqListenerMetrics implements MeterBinder {
                 .register(registry);
     }
 
-    private Counter counter(MeterRegistry registry, String name, String listenerId, String queue, String result) {
-        return Counter.builder(name)
-                .tags("listener", listenerId, "queue", queue, "result", result)
-                .register(registry);
-    }
-
-    private void forEachRegistry(Consumer<MeterRegistry> action) {
-        registries.forEach(registry -> {
+    private void forEachRegistry(Consumer<RegistryMeters> action) {
+        registries.forEach(bound -> {
             try {
-                action.accept(registry);
+                action.accept(bound);
             } catch (RuntimeException error) {
                 logger.warn("failed to record PGMQ listener metric", error);
             }
         });
     }
 
-    private Timer timer(MeterRegistry registry, String name, String description,
-            String listenerId, String queue, String result) {
-        return Timer.builder(name)
-                .description(description)
-                .tags("listener", listenerId, "queue", queue, "result", result)
-                .register(registry);
+    /** Providers reuse Micrometer's registration path; tag sets are shared by each counter/timer pair. */
+    private record RegistryMeters(MeterRegistry registry, MeterProvider<Counter> polls,
+            MeterProvider<Timer> pollDuration, MeterProvider<Counter> messages,
+            MeterProvider<Timer> processingDuration) {
+        static RegistryMeters create(MeterRegistry registry) {
+            return new RegistryMeters(registry,
+                    Counter.builder("pgmq.listener.polls").withRegistry(registry),
+                    Timer.builder("pgmq.listener.poll.duration").description("PGMQ listener poll duration").withRegistry(registry),
+                    Counter.builder("pgmq.listener.messages").withRegistry(registry),
+                    Timer.builder("pgmq.listener.processing.duration").description("PGMQ listener processing duration")
+                            .withRegistry(registry));
+        }
     }
 }

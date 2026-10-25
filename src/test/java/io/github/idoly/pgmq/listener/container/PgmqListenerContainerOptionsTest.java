@@ -26,6 +26,24 @@ class PgmqListenerContainerOptionsTest {
                 1, 1, 10, 30, true, AckMode.AUTO));
     }
 
+    @Test
+    void rejectsEmptyIdentityAndConditionalAtTheRuntimeBoundary() {
+        for (String blank : new String[] {null, "", " "}) {
+            assertThrows(IllegalArgumentException.class, () -> new PgmqListenerContainerOptions(
+                    blank, "queue", 30, 10, "{}", PgmqListener.Mode.READ, 0, 1, 1, 1, 10, 30, true, AckMode.AUTO));
+            assertThrows(IllegalArgumentException.class, () -> new PgmqListenerContainerOptions(
+                    "listener", blank, 30, 10, "{}", PgmqListener.Mode.READ, 0, 1, 1, 1, 10, 30, true, AckMode.AUTO));
+            assertThrows(IllegalArgumentException.class, () -> new PgmqListenerContainerOptions(
+                    "listener", "queue", 30, 10, blank, PgmqListener.Mode.READ, 0, 1, 1, 1, 10, 30, true, AckMode.AUTO));
+        }
+        assertThrows(IllegalArgumentException.class, () -> new PgmqListenerContainerOptions(
+                "listener", "queue", 0, 10, "{}", PgmqListener.Mode.READ, 0, 1, 1, 1, 10, 30, true, AckMode.AUTO));
+        assertThrows(IllegalArgumentException.class, () -> new PgmqListenerContainerOptions(
+                "listener", "queue", 30, 0, "{}", PgmqListener.Mode.READ, 0, 1, 1, 1, 10, 30, true, AckMode.AUTO));
+        assertThrows(IllegalArgumentException.class, () -> new PgmqListenerContainerOptions(
+                "listener", "queue", 30, 10, "{}", PgmqListener.Mode.READ, 0, 1, 1, 1, 10, 30, true, null));
+    }
+
     private static PgmqListenerContainerOptions options(int maxPollSeconds, int pollIntervalMs,
             int consumerConcurrency, int pollConcurrency, int maxInFlight, int shutdownTimeoutSeconds) {
         return new PgmqListenerContainerOptions(

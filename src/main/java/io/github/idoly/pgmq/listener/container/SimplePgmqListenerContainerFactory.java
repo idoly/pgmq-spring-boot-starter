@@ -1,6 +1,9 @@
 package io.github.idoly.pgmq.listener.container;
 
+import org.springframework.beans.propertyeditors.CustomBooleanEditor;
+import org.springframework.context.EmbeddedValueResolverAware;
 import org.springframework.util.Assert;
+import org.springframework.util.StringValueResolver;
 import org.springframework.util.StringUtils;
 
 import io.github.idoly.pgmq.PgmqException;
@@ -21,7 +24,7 @@ import io.github.idoly.pgmq.template.PgmqTemplate;
  * defaults and creates method listener adapters for endpoint methods.</p>
  */
 public class SimplePgmqListenerContainerFactory
-        implements PgmqListenerContainerFactory<MethodPgmqListenerEndpoint> {
+        implements PgmqListenerContainerFactory<MethodPgmqListenerEndpoint>, EmbeddedValueResolverAware {
 
     /** Template shared by containers created by this factory. */
     private final PgmqTemplate pgmqTemplate;
@@ -37,6 +40,8 @@ public class SimplePgmqListenerContainerFactory
 
     /** Metrics shared by containers created by this factory. */
     private final PgmqListenerMetrics listenerMetrics;
+
+    private StringValueResolver valueResolver = value -> value;
 
     /**
      * Create a factory with custom executor and metric infrastructure.
@@ -60,6 +65,12 @@ public class SimplePgmqListenerContainerFactory
         this.errorHandler = errorHandler;
         this.executorFactory = executorFactory;
         this.listenerMetrics = listenerMetrics;
+    }
+
+    @Override
+    public void setEmbeddedValueResolver(StringValueResolver resolver) {
+        Assert.notNull(resolver, "String value resolver must not be null");
+        this.valueResolver = resolver;
     }
 
     /**
@@ -88,60 +99,41 @@ public class SimplePgmqListenerContainerFactory
         PgmqListener annotation = endpoint.getAnnotation();
         PgmqProperties.Listener listenerProperties = properties.getListener();
 
-        return new PgmqListenerContainerOptions(
-                endpoint.getId(),
-                endpoint.getQueue(),
-                resolvePositive(annotation.visibilityTimeout(), listenerProperties.getVisibilityTimeout(),
-                        "visibilityTimeout"),
-                resolvePositive(annotation.batchSize(), listenerProperties.getBatchSize(), "batchSize"),
-                resolveConditional(annotation.conditional(), listenerProperties.getConditional()),
-                resolveMode(annotation.mode(), listenerProperties.getMode()),
-                resolveNonNegative(annotation.maxPollSeconds(), listenerProperties.getMaxPollSeconds(),
-                        "maxPollSeconds"),
-                resolvePositive(annotation.pollIntervalMs(), listenerProperties.getPollIntervalMs(),
-                        "pollIntervalMs"),
-                resolvePositive(annotation.consumerConcurrency(), listenerProperties.getConsumerConcurrency(),
-                        "consumerConcurrency"),
-                resolvePositive(annotation.pollConcurrency(), listenerProperties.getPollConcurrency(),
-                        "pollConcurrency"),
-                resolvePositive(annotation.maxInFlight(), listenerProperties.getMaxInFlight(), "maxInFlight"),
-                resolveNonNegative(annotation.executorShutdownTimeoutSeconds(),
-                        listenerProperties.getExecutorShutdownTimeoutSeconds(), "executorShutdownTimeoutSeconds"),
-                resolveAutoStartup(annotation.autoStartup(), listenerProperties.isAutoStartup()),
-                resolveAckMode(annotation.ackMode(), listenerProperties.getAckMode())
-        );
+        try {
+            return new PgmqListenerContainerOptions(
+                    endpoint.getId(), endpoint.getQueue(),
+                    resolveInt(annotation.visibilityTimeout(), listenerProperties.getVisibilityTimeout()),
+                    resolveInt(annotation.batchSize(), listenerProperties.getBatchSize()),
+                    resolveConditional(annotation.conditional(), listenerProperties.getConditional()),
+                    resolveMode(annotation.mode(), listenerProperties.getMode()),
+                    resolveInt(annotation.maxPollSeconds(), listenerProperties.getMaxPollSeconds()),
+                    resolveInt(annotation.pollIntervalMs(), listenerProperties.getPollIntervalMs()),
+                    resolveInt(annotation.consumerConcurrency(), listenerProperties.getConsumerConcurrency()),
+                    resolveInt(annotation.pollConcurrency(), listenerProperties.getPollConcurrency()),
+                    resolveInt(annotation.maxInFlight(), listenerProperties.getMaxInFlight()),
+                    resolveInt(annotation.executorShutdownTimeoutSeconds(), listenerProperties.getExecutorShutdownTimeoutSeconds()),
+                    resolveAutoStartup(annotation.autoStartup(), listenerProperties.isAutoStartup()),
+                    resolveAckMode(annotation.ackMode(), listenerProperties.getAckMode()));
+        } catch (IllegalArgumentException error) {
+            throw new PgmqException("Invalid PGMQ listener " + endpoint.getId() + ": " + error.getMessage(), error);
+        }
     }
 
-    /**
-     * Resolve a positive integer option.
-     */
-    private int resolvePositive(int annotationValue, int propertyValue, String name) {
-        int value = annotationValue >= 0 ? annotationValue : propertyValue;
-        if (value <= 0) {
-            throw new PgmqException("@PgmqListener " + name + " must be greater than 0");
-        }
-        return value;
-    }
-
-    /**
-     * Resolve a non-negative integer option.
-     */
-    private int resolveNonNegative(int annotationValue, int propertyValue, String name) {
-        int value = annotationValue >= 0 ? annotationValue : propertyValue;
-        if (value < 0) {
-            throw new PgmqException("@PgmqListener " + name + " must be greater than or equal to 0");
-        }
-        return value;
+    /** Only -1 means inherit; the resolved options own numeric validation. */
+    private int resolveInt(int annotationValue, int propertyValue) {
+        return annotationValue == -1 ? propertyValue : annotationValue;
     }
 
     /**
      * Resolve the JSON conditional used by read mode.
      */
     private String resolveConditional(String annotationValue, String propertyValue) {
-        if (StringUtils.hasText(annotationValue)) {
-            return annotationValue;
+        String conditional = StringUtils.hasText(annotationValue) ? annotationValue : propertyValue;
+        if (!StringUtils.hasText(conditional)) {
+            return PgmqTemplate.DEFAULT_CONDITIONAL;
         }
-        return StringUtils.hasText(propertyValue) ? propertyValue : PgmqTemplate.DEFAULT_CONDITIONAL;
+        String resolved = valueResolver.resolveStringValue(conditional);
+        return StringUtils.hasText(resolved) ? resolved : PgmqTemplate.DEFAULT_CONDITIONAL;
     }
 
     /**
@@ -156,7 +148,12 @@ public class SimplePgmqListenerContainerFactory
      * Resolve the auto-startup flag.
      */
     private boolean resolveAutoStartup(String annotationValue, boolean propertyValue) {
-        return StringUtils.hasText(annotationValue) ? Boolean.parseBoolean(annotationValue) : propertyValue;
+        if (!StringUtils.hasText(annotationValue)) {
+            return propertyValue;
+        }
+        CustomBooleanEditor editor = new CustomBooleanEditor(false);
+        editor.setAsText(valueResolver.resolveStringValue(annotationValue));
+        return (Boolean) editor.getValue();
     }
 
     /**

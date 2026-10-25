@@ -20,6 +20,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.aop.support.AopUtils;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
@@ -43,17 +45,19 @@ import io.github.idoly.pgmq.annotation.PgmqListener;
 import io.github.idoly.pgmq.config.PgmqAutoConfiguration;
 import io.github.idoly.pgmq.config.PgmqInitializer;
 import io.github.idoly.pgmq.config.PgmqProperties;
+import io.github.idoly.pgmq.listener.adapter.MethodPgmqMessageListenerAdapter;
 import io.github.idoly.pgmq.listener.container.DefaultPgmqListenerExecutorFactory;
 import io.github.idoly.pgmq.listener.container.PgmqListenerContainer;
 import io.github.idoly.pgmq.listener.container.PgmqListenerContainerOptions;
 import io.github.idoly.pgmq.listener.endpoint.PgmqListenerEndpointRegistry;
 import io.github.idoly.pgmq.message.PgmqMessage;
 import io.github.idoly.pgmq.metrics.PgmqListenerMetrics;
+import io.github.idoly.pgmq.testsupport.PostgresIntegrationSupport;
 import io.github.idoly.pgmq.template.PgmqTemplate;
 
 /** Real JDBC checks against an explicitly supplied disposable PostgreSQL database. */
 @EnabledIfEnvironmentVariable(named = "PGMQ_TEST_JDBC_URL", matches = ".+")
-class PgmqJdbcLifecycleIntegrationTest {
+class PgmqJdbcLifecycleIntegrationTest extends PostgresIntegrationSupport {
 
     private static JdbcTemplate admin;
     private static PgmqTemplate adminTemplate;
@@ -61,8 +65,7 @@ class PgmqJdbcLifecycleIntegrationTest {
 
     @BeforeAll
     static void initialize() {
-        var dataSource = new DriverManagerDataSource(System.getenv("PGMQ_TEST_JDBC_URL"),
-                username(), System.getenv().getOrDefault("PGMQ_TEST_PASSWORD", "postgres"));
+        var dataSource = new DriverManagerDataSource(jdbcUrl(), username(), password());
         admin = new JdbcTemplate(dataSource);
         admin.setQueryTimeout(5);
         new PgmqInitializer(admin, new PgmqProperties()).init();
@@ -96,8 +99,7 @@ class PgmqJdbcLifecycleIntegrationTest {
 
     @Test
     void queueLockFollowsTheCallingTransaction() {
-        var contender = new JdbcTemplate(new DriverManagerDataSource(System.getenv("PGMQ_TEST_JDBC_URL"),
-                username(), System.getenv().getOrDefault("PGMQ_TEST_PASSWORD", "postgres")));
+        var contender = new JdbcTemplate(new DriverManagerDataSource(jdbcUrl(), username(), password()));
         var transaction = new TransactionTemplate(new DataSourceTransactionManager(admin.getDataSource()));
         String tryLock = "select pg_try_advisory_xact_lock(hashtext('pgmq.queue_' || ?))";
         transaction.executeWithoutResult(status -> {
@@ -205,7 +207,7 @@ class PgmqJdbcLifecycleIntegrationTest {
 
     @Test
     void sharedHeadersWorkWithDelayAndTimestampForQueueAndTopicBatches() {
-        var headers = Map.<String, Object>of("source", "shared");
+        Map<String, String> headers = Map.of("source", "shared");
         var at = OffsetDateTime.now().minusSeconds(1);
         adminTemplate.sendBatch(queue, List.of("batch-delay"), headers, 0);
         adminTemplate.sendBatch(queue, List.of("batch-time"), headers, at);
@@ -229,6 +231,92 @@ class PgmqJdbcLifecycleIntegrationTest {
         String index = adminTemplate.formatTableName(queue, "q") + "_fifo_idx";
         assertEquals(1, admin.queryForObject("select count(*) from pg_indexes where schemaname = 'pgmq'"
                 + " and indexname = ?", Integer.class, index));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"missing", "known", "non-string"})
+    void badTypeHintDoesNotHideHealthyBatchMessages(String hintKind) throws Exception {
+        Object hint = switch (hintKind) {
+            case "missing" -> "missing.producer.Event";
+            case "known" -> EventPayload.class.getName();
+            default -> 42;
+        };
+        String headers = new ObjectMapper().writeValueAsString(Map.of(PgmqTemplate.TYPE_HEADER, hint));
+        long badId = admin.queryForObject("select * from pgmq.send(?, ?::jsonb, ?::jsonb)", Long.class,
+                queue, "{\"id\":\"invalid\",\"kind\":\"created\"}", headers);
+        adminTemplate.send(queue, new EventPayload(42, "created"));
+        var receiver = new EventReceiver();
+        var failed = new CountDownLatch(1);
+        var failedMessage = new java.util.concurrent.atomic.AtomicReference<PgmqMessage>();
+        try (var pool = pool(3)) {
+            var template = new PgmqTemplate(new JdbcTemplate(pool), new ObjectMapper());
+            var adapter = new MethodPgmqMessageListenerAdapter(template, receiver,
+                    EventReceiver.class.getDeclaredMethod("handle", EventPayload.class));
+            var options = new PgmqListenerContainerOptions(queue, queue, 30, 2, "{}", PgmqListener.Mode.READ,
+                    0, 100, 1, 1, 2, 3, true, AckMode.AUTO);
+            var container = new PgmqListenerContainer(template, adapter, (error, message, ack) -> {
+                failedMessage.set(message);
+                ack.acknowledge();
+                failed.countDown();
+            }, options, new DefaultPgmqListenerExecutorFactory(), new PgmqListenerMetrics());
+            try {
+                container.start();
+                assertTrue(failed.await(3, TimeUnit.SECONDS), "conversion failure must reach the message error handler");
+                assertTrue(receiver.processed.await(3, TimeUnit.SECONDS), "healthy messages must still be delivered");
+                await(() -> adminTemplate.getMetrics(queue).queueLength() == 0);
+            } finally {
+                container.stop();
+            }
+        }
+        assertEquals(badId, failedMessage.get().msgId());
+        assertInstanceOf(Map.class, failedMessage.get().payload());
+        assertEquals(new EventPayload(42, "created"), receiver.payload);
+    }
+
+    @Test
+    void typedDtoListsCreateSeparateQueueAndTopicMessages() {
+        List<EventPayload> events = List.of(new EventPayload(1, "created"), new EventPayload(2, "updated"));
+        var ids = adminTemplate.sendBatch(queue, events);
+        assertEquals(2, ids.size());
+        assertEquals(events, adminTemplate.read(queue, 30, 10).stream().map(PgmqMessage::payload).toList());
+        assertEquals(2, adminTemplate.archive(queue, ids).size());
+        adminTemplate.bindTopic("typed.*", queue);
+        assertEquals(2, adminTemplate.sendBatchTopic("typed.created", events).size());
+        assertEquals(events, adminTemplate.read(queue, 30, 10).stream().map(PgmqMessage::payload).toList());
+    }
+
+    @Test
+    void staleTypeHintKeepsGenericJsonForDirectReads() {
+        admin.queryForObject("select * from pgmq.send(?, ?::jsonb, ?::jsonb)", Long.class, queue,
+                "{\"id\":7,\"kind\":\"created\"}", "{\"_type\":\"previous.release.Event\"}");
+        var message = adminTemplate.read(queue, 30, 1).get(0);
+        assertEquals(Map.of("id", 7, "kind", "created"), message.payload());
+        assertEquals("previous.release.Event", message.headers().get(PgmqTemplate.TYPE_HEADER));
+        assertEquals(new EventPayload(7, "created"), adminTemplate.convertMessagePayload(message, EventPayload.class));
+    }
+
+    public record EventPayload(int id, String kind) {}
+
+    static class EventReceiver {
+        final CountDownLatch processed = new CountDownLatch(1);
+        volatile EventPayload payload;
+
+        void handle(EventPayload payload) {
+            this.payload = payload;
+            processed.countDown();
+        }
+    }
+
+    @Test
+    void sqlNullPayloadAndHeadersRemainReadable() {
+        long id = admin.queryForObject("select * from pgmq.send(?, ?::jsonb, ?::jsonb)", Long.class,
+                queue, null, null);
+        var message = adminTemplate.read(queue, 30, 1).get(0);
+        assertEquals(id, message.msgId());
+        assertNull(message.payload());
+        assertTrue(message.headers().isEmpty());
+        assertNotNull(message.lastReadAt());
+        assertTrue(adminTemplate.archive(queue, id));
     }
 
     @Test
@@ -450,15 +538,11 @@ class PgmqJdbcLifecycleIntegrationTest {
                 executors, new PgmqListenerMetrics());
     }
 
-    private static String username() {
-        return System.getenv().getOrDefault("PGMQ_TEST_USERNAME", "postgres");
-    }
-
     private static HikariDataSource pool(int maxConnections) {
         var pool = new HikariDataSource();
-        pool.setJdbcUrl(System.getenv("PGMQ_TEST_JDBC_URL"));
+        pool.setJdbcUrl(jdbcUrl());
         pool.setUsername(username());
-        pool.setPassword(System.getenv().getOrDefault("PGMQ_TEST_PASSWORD", "postgres"));
+        pool.setPassword(password());
         pool.setMaximumPoolSize(maxConnections);
         pool.setMinimumIdle(0);
         pool.setConnectionTimeout(250);

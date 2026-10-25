@@ -42,7 +42,20 @@ implementation. The SQL resource remains the authority for database behavior.
 
 Read, polling, pop, partition and archive conversion overloads omit unspecified SQL arguments,
 so PostgreSQL supplies the remaining defaults. A zero polling duration retains the documented
-single-read behavior. Explicit options are passed through unchanged.
+single-read behavior. Explicit options are passed through unchanged. For example, the upstream
+partition signature is:
+
+```sql
+create_partitioned(
+    queue_name TEXT,
+    partition_interval TEXT DEFAULT '10000',
+    retention_interval TEXT DEFAULT '100000',
+    premake INTEGER DEFAULT 4
+)
+```
+
+The one-, two-, three- and four-argument Java overloads invoke that public SQL function with the
+same number of arguments. A separate Java `Internal` entry point is not needed.
 
 ## Topics and notifications
 
@@ -62,9 +75,9 @@ single-read behavior. Explicit options are passed through unchanged.
 | `list_notify_insert_throttles` | `listNotifyInsertThrottles` |
 | `notify_queue_listeners` | Trigger installed by `enableNotifyInsert`; no ordinary Java invocation |
 
-Both batch-send APIs accept a shared header map with either an integer delay or an absolute
-timestamp, as well as a per-message header list. Shared maps delegate to the existing expansion
-and type-header handling.
+Both batch-send APIs accept typed payload lists and read-only typed headers (`List<?>`,
+`Map<String, ?>`, or a covariant list of header maps). Shared maps delegate to the existing expansion
+and type-header handling, with either an integer delay or an absolute timestamp.
 
 ## Upstream implementation details
 

@@ -48,7 +48,7 @@ public record PgmqListenerContainerOptions(
         Assert.hasText(queue, "Queue name must not be empty");
         Assert.isTrue(visibilityTimeout > 0, "Visibility timeout must be greater than 0");
         Assert.isTrue(batchSize > 0, "Batch size must be greater than 0");
-        Assert.notNull(conditional, "Conditional must not be null");
+        Assert.hasText(conditional, "Conditional must not be empty");
         Assert.notNull(mode, "Listener mode must not be null");
         Assert.isTrue(maxPollSeconds >= 0, "Max poll seconds must be greater than or equal to 0");
         Assert.isTrue(pollIntervalMs > 0, "Poll interval must be greater than 0");

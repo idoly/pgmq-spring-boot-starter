@@ -3,6 +3,7 @@ package io.github.idoly.pgmq.listener.container;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
@@ -185,7 +186,7 @@ class PgmqListenerContainerTest {
         CountDownLatch releaseOldPoll = new CountDownLatch(1);
         CountDownLatch releaseNewPoll = new CountDownLatch(1);
         AtomicInteger polls = new AtomicInteger();
-        AtomicInteger processed = new AtomicInteger();
+        CountDownLatch unexpectedDispatch = new CountDownLatch(1);
         var executors = new ArrayList<RecordingExecutor>();
         when(template.readWithPoll(eq("queue"), eq(30), anyInt(), eq(0), eq(10), eq("{}")))
                 .thenAnswer(invocation -> {
@@ -208,7 +209,7 @@ class PgmqListenerContainerTest {
             }
         };
         var container = new PgmqListenerContainer(template,
-                (record, acknowledgment) -> processed.incrementAndGet(),
+                (record, acknowledgment) -> unexpectedDispatch.countDown(),
                 (error, record, acknowledgment) -> {}, containerOptions(1, 1, 1, 0), factory,
                 new PgmqListenerMetrics());
         try {
@@ -219,7 +220,8 @@ class PgmqListenerContainerTest {
             assertTrue(newPollStarted.await(2, TimeUnit.SECONDS));
             releaseOldPoll.countDown();
             assertTrue(executors.get(0).finished.await(2, TimeUnit.SECONDS));
-            assertEquals(0, processed.get());
+            assertFalse(unexpectedDispatch.await(200, TimeUnit.MILLISECONDS),
+                    "a stopped poll must not dispatch into the restarted consumer executor");
         } finally {
             releaseOldPoll.countDown();
             container.stop();
@@ -257,6 +259,74 @@ class PgmqListenerContainerTest {
         protected void afterExecute(Runnable task, Throwable error) {
             failure = error;
             finished.countDown();
+        }
+    }
+
+    @Test
+    void capacityDivisionDoesNotOverflowForLargeValidLimits() throws Exception {
+        var template = mock(PgmqTemplate.class);
+        var pollsStarted = new CountDownLatch(2);
+        var release = new CountDownLatch(1);
+        var firstQuantity = new AtomicInteger();
+        when(template.readWithPoll(eq("queue"), eq(30), anyInt(), eq(0), eq(10), eq("{}")))
+                .thenAnswer(invocation -> {
+                    firstQuantity.compareAndSet(0, invocation.getArgument(2));
+                    pollsStarted.countDown();
+                    release.await(5, TimeUnit.SECONDS);
+                    return List.of();
+                });
+        var executors = new DefaultPgmqListenerExecutorFactory() {
+            @Override
+            public ExecutorService createConsumerExecutor(PgmqListenerContainerOptions options) {
+                return java.util.concurrent.Executors.newSingleThreadExecutor();
+            }
+        };
+        var container = new PgmqListenerContainer(template, (message, ack) -> {}, (error, message, ack) -> {},
+                containerOptions(1, 2, Integer.MAX_VALUE, 2), executors, new PgmqListenerMetrics());
+        try {
+            container.start();
+            assertTrue(pollsStarted.await(2, TimeUnit.SECONDS));
+            assertEquals(10, firstQuantity.get());
+        } finally {
+            release.countDown();
+            container.stop();
+        }
+    }
+
+    @Test
+    void failedExecutorCreationCleansUpAndAllowsRestart() throws Exception {
+        var template = mock(PgmqTemplate.class);
+        var consumers = new ArrayList<ExecutorService>();
+        var attempts = new AtomicInteger();
+        var factory = new DefaultPgmqListenerExecutorFactory() {
+            @Override
+            public ExecutorService createConsumerExecutor(PgmqListenerContainerOptions options) {
+                var executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+                consumers.add(executor);
+                return executor;
+            }
+
+            @Override
+            public ExecutorService createPollExecutor(PgmqListenerContainerOptions options) {
+                if (attempts.getAndIncrement() == 0) {
+                    throw new IllegalStateException("poll executor creation failed");
+                }
+                return super.createPollExecutor(options);
+            }
+        };
+        var container = new PgmqListenerContainer(template, (message, ack) -> {}, (error, message, ack) -> {},
+                containerOptions(1, 1, 1, 2), factory, new PgmqListenerMetrics());
+        try {
+            assertThrows(IllegalStateException.class, container::start);
+            assertFalse(container.isRunning());
+            assertTrue(consumers.get(0).isShutdown());
+            container.start();
+            assertTrue(container.isRunning());
+        } finally {
+            container.stop();
+            for (var executor : consumers) {
+                assertTrue(executor.awaitTermination(2, TimeUnit.SECONDS));
+            }
         }
     }
 

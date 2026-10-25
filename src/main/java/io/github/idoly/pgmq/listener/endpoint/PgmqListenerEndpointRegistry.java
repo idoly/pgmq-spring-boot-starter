@@ -43,11 +43,21 @@ public class PgmqListenerEndpointRegistry implements SmartLifecycle {
         }
 
         PgmqListenerContainer container = factory.createListenerContainer(endpoint);
-        listenerContainers.put(id, container);
-
         if (running && container.isAutoStartup()) {
-            container.start();
+            try {
+                container.start();
+            } catch (RuntimeException error) {
+                try {
+                    container.stop();
+                } catch (RuntimeException stopError) {
+                    if (stopError != error) {
+                        error.addSuppressed(stopError);
+                    }
+                }
+                throw error;
+            }
         }
+        listenerContainers.put(id, container);
     }
 
     /**
@@ -86,7 +96,9 @@ public class PgmqListenerEndpointRegistry implements SmartLifecycle {
             try {
                 stop();
             } catch (RuntimeException stopError) {
-                error.addSuppressed(stopError);
+                if (stopError != error) {
+                    error.addSuppressed(stopError);
+                }
             }
             throw error;
         }
@@ -108,7 +120,7 @@ public class PgmqListenerEndpointRegistry implements SmartLifecycle {
             } catch (RuntimeException error) {
                 if (failure == null) {
                     failure = error;
-                } else {
+                } else if (failure != error) {
                     failure.addSuppressed(error);
                 }
             }

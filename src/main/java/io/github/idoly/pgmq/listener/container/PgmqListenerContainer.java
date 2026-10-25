@@ -4,7 +4,6 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -45,7 +44,8 @@ public class PgmqListenerContainer implements SmartLifecycle {
 
     /** Resources belong to one start/stop cycle, including tasks that outlive stop. */
     private static final class RunState {
-        private final AtomicBoolean active = new AtomicBoolean(true);
+        // start/stop serialize writes; pollers read the flag without taking the lifecycle lock.
+        private volatile boolean active = true;
         private final Semaphore permits;
         private ExecutorService pollExecutor;
         private ExecutorService consumerExecutor;
@@ -149,7 +149,7 @@ public class PgmqListenerContainer implements SmartLifecycle {
                 run.pollExecutor.submit(() -> pollLoop(run));
             }
         } catch (RuntimeException error) {
-            run.active.set(false);
+            run.active = false;
             shutdownNow(run.pollExecutor);
             shutdownNow(run.consumerExecutor);
             currentRun = null;
@@ -158,13 +158,13 @@ public class PgmqListenerContainer implements SmartLifecycle {
     }
 
     private void pollLoop(RunState run) {
-        while (run.active.get() && !Thread.currentThread().isInterrupted()) {
+        while (run.active && !Thread.currentThread().isInterrupted()) {
             int reservedPermits = 0;
             long pollStartedNanos = 0;
             boolean pollMetricRecorded = false;
             try {
                 reservedPermits = reserveCapacity(run);
-                if (!run.active.get()) {
+                if (!run.active) {
                     break;
                 }
                 pollStartedNanos = System.nanoTime();
@@ -184,7 +184,7 @@ public class PgmqListenerContainer implements SmartLifecycle {
                 }
 
                 for (PgmqMessage message : messages) {
-                    if (!run.active.get()) {
+                    if (!run.active) {
                         break;
                     }
                     run.consumerExecutor.execute(() -> process(run, message));
@@ -197,7 +197,7 @@ public class PgmqListenerContainer implements SmartLifecycle {
                     listenerMetrics.recordPoll(listenerOptions.id(), listenerOptions.queue(),
                             System.nanoTime() - pollStartedNanos, "error");
                 }
-                if (run.active.get()) {
+                if (run.active) {
                     logger.error("failed to poll PGMQ listener " + listenerOptions.id(), error);
                     pauseAfterFailure();
                 }
@@ -211,8 +211,7 @@ public class PgmqListenerContainer implements SmartLifecycle {
         Semaphore current = run.permits;
         current.acquire();
         int reservedPermits = 1;
-        int permitsPerPoller = (listenerOptions.maxInFlight() + listenerOptions.pollConcurrency() - 1)
-                / listenerOptions.pollConcurrency();
+        int permitsPerPoller = (listenerOptions.maxInFlight() - 1) / listenerOptions.pollConcurrency() + 1;
         int limit = Math.min(listenerOptions.batchSize(), permitsPerPoller);
         while (reservedPermits < limit && current.tryAcquire()) {
             reservedPermits++;
@@ -293,9 +292,10 @@ public class PgmqListenerContainer implements SmartLifecycle {
     @Override
     public synchronized void stop() {
         RunState run = currentRun;
-        if (run == null || !run.active.compareAndSet(true, false)) {
+        if (run == null || !run.active) {
             return;
         }
+        run.active = false;
 
         logger.info("stopping PgmqListenerContainer " + listenerOptions.id() + " for queue " + listenerOptions.queue());
         ExecutorService currentPollExecutor = run.pollExecutor;
@@ -357,7 +357,7 @@ public class PgmqListenerContainer implements SmartLifecycle {
     @Override
     public boolean isRunning() {
         RunState run = currentRun;
-        return run != null && run.active.get();
+        return run != null && run.active;
     }
 
     /**

@@ -1,34 +1,24 @@
-# Listener configuration and operation
+# Listener operation and tuning
 
-The examples below are starting points for one application instance. Measure processing latency,
-connection waits and database load before increasing concurrency. Every application replica has
-its own threads and connection pool.
+Start with small, explicit concurrency and measure processing tail latency, queue age and JDBC pool
+waits. Values are per listener and per application replica. More threads do not create more database
+capacity.
 
-## Budget database connections before threads
+## Connection and in-flight budgets
 
-Each listener owns a poll executor and a consumer executor. A database long poll holds a JDBC
-connection while it waits. Consumer threads use connections when business code or acknowledgement
-SQL runs; an idle consumer thread does not reserve a connection.
-
-A conservative capacity budget is:
+A long poll occupies a JDBC connection while it waits. Consumers borrow connections for business
+SQL and acknowledgement; idle consumer threads do not reserve a connection.
 
 ```text
-pool capacity >= long-poll connections + concurrent consumer database work + other database work + margin
-long-poll connections <= sum(poll-concurrency) across running listeners
+pool budget >= active long polls + concurrent consumer database work + other work + margin
+active long polls <= sum(poll-concurrency) across running listeners
 ```
 
-Consumer database work includes acknowledgements. Count transaction-bound connections for the
-whole transaction, including time spent on external calls inside it. Account for sends, HTTP
-requests, scheduled jobs and metric refreshes in other database work. The budget is an upper
-bound, not a measurement of simultaneous usage.
+This is a conservative budget rather than a measurement of simultaneous usage. Include transaction
+connections held during external calls, HTTP requests, senders, scheduled tasks and database metrics.
+Budget PostgreSQL server connections across all replicas and applications too.
 
-Use your connection pool's configuration and active, idle and pending connection metrics to
-check this budget. Reserve server connections across all replicas and other applications as well.
-The starter does not infer or change your application's connection pool size.
-
-## A small queue with low processing latency
-
-This example has one listener, four consumer threads and at most four messages in flight:
+For one modest queue, a starting point is:
 
 ```yaml
 spring:
@@ -42,135 +32,97 @@ pgmq:
     max-in-flight: 4
     batch-size: 4
     max-poll-seconds: 5
-    poll-interval-ms: 50
+    poll-interval-ms: 100
     visibility-timeout: 30
 ```
 
-A smaller poll interval can reduce idle delivery latency while increasing PostgreSQL work.
-`max-poll-seconds` controls how long the database call waits, not how long a message may execute.
-Keep JDBC query timeouts above the intended long-poll duration, with room for database latency.
-Configure connection acquisition, query execution and network timeouts for their separate purposes:
-a pool acquisition timeout does not cancel an executing SQL statement, and thread interruption
-alone is not a guarantee that a JDBC driver cancels its query. The SQL polling deadline is checked
-between read attempts, so it also does not bound time spent waiting inside an individual statement.
-A zero `max-poll-seconds` performs one immediate read. After an empty immediate read, a listener
-waits `poll-interval-ms` before trying again. A non-empty read is dispatched immediately.
+The template's long-poll methods can omit SQL-defaulted arguments. A listener passes its resolved
+configuration explicitly. A zero duration uses one ordinary read; after an empty result the container
+sleeps for `poll-interval-ms`. Non-empty batches dispatch immediately.
 
-## Slow or variable-duration tasks
+The default consumer queue is bounded and the semaphore reserves capacity before reads. Custom
+executors must enforce the desired worker concurrency and belong to their container. Use the existing
+`PgmqListenerExecutorFactory` extension point rather than sharing an executor directly: stopping one
+container shuts down the executors it owns. A Java 21+ application can provide virtual-thread
+executors, but still needs bounded in-flight work and the same JDBC budget.
 
-Keep local buffering small so messages spend less of their visibility window waiting for a
-consumer. For tasks normally completing within 30 seconds, a starting configuration is:
+## Slow work and redelivery
 
-```yaml
-pgmq:
-  listener:
-    poll-concurrency: 1
-    consumer-concurrency: 4
-    max-in-flight: 4
-    batch-size: 4
-    visibility-timeout: 120
-    executor-shutdown-timeout-seconds: 150
-```
-
-Choose visibility timeout from measured tail latency:
+The visibility window starts when PostgreSQL reads the message, including local queue wait:
 
 ```text
 visibility timeout > queue wait + processing time + acknowledgement time + margin
 ```
 
-The visibility window starts when PostgreSQL reads the message. Increasing `max-in-flight`
-without increasing consumer throughput can consume that window in the local executor queue.
-This starter does not automatically renew visibility. A handler that runs beyond its visibility
-timeout can execute concurrently with a redelivery. Use idempotent business operations and size
-the timeout for your workload. Longer visibility also delays retries after a crashed consumer.
+For work normally finishing within 30 seconds, start with four consumers, `max-in-flight: 4`, a
+120-second visibility timeout and an appropriately longer shutdown allowance. These are examples,
+not measured universal settings. Increasing buffering without throughput consumes visibility time.
 
-Configure Spring's shutdown phase timeout and the deployment termination grace period to cover
-listener draining. Each container can wait for poller shutdown and then consumer shutdown, each
-up to `executor-shutdown-timeout-seconds`; the registry stops its containers sequentially. A
-zero timeout requests immediate interruption. Tasks and JDBC drivers may ignore interrupts;
-late tasks retain their original run's capacity and cannot dispatch work into a restarted run,
-but a task already executing may still finish business work or acknowledge its message. Messages
-returned by a late poll that are not dispatched become eligible for delivery again when their
-visibility timeout expires.
+The starter does not automatically renew visibility. Expiry can produce concurrent redelivery, even
+while an old task is still running. Use business idempotency. A longer window also delays recovery
+from a crashed consumer. The default error handler logs and leaves messages for visibility-based
+redelivery; maximum attempts, backoff and dead-letter routing are application policies through
+`PgmqErrorHandler` and `PgmqAcknowledgment`.
 
-## Many queues in one application
+FIFO SQL modes control selection. Concurrent handlers can finish in a different order. Define the
+required per-group execution contract before increasing concurrency.
 
-Properties are defaults for each listener, not a global pool limit. With eight listeners at
-`poll-concurrency: 1`, allow up to eight long-poll connections. If each listener has two consumers
-that can hold business connections, the conservative budget includes another sixteen connections,
-plus other application work and margin. Check the aggregate before increasing per-listener values.
-Override concurrency on individual `@PgmqListener` methods for busy queues.
+## Transactions and completion
 
-Retain the existing `PgmqListenerExecutorFactory` extension point for custom executors. The
-container shuts down executors returned by the factory, so return executors owned by that
-container. Sharing one executor directly between containers allows stopping one listener to shut
-down the others. A Java 21+ application may supply virtual-thread executors, but it still needs
-bounded in-flight work and the same connection budget. Custom consumer executors must enforce
-any desired execution concurrency; the container's semaphore bounds total in-flight messages.
-
-## Transactions, acknowledgement and retries
-
-For atomic business changes and queue completion in PostgreSQL, invoke a transactional Spring
-service using the same data source and transaction manager as `PgmqTemplate`. One possible listener
-shape is:
+Use a separate transactional Spring service, invoked through its proxy, with the same data source
+and transaction manager as the template:
 
 ```java
 @PgmqListener(value = "orders", ackMode = AckMode.MANUAL)
-public void onOrder(OrderEvent event, PgmqAcknowledgment acknowledgment) {
+public void receive(OrderEvent event, PgmqAcknowledgment acknowledgment) {
     orderService.applyAndAcknowledge(event, acknowledgment);
 }
 
-// On a separate Spring-managed service, invoked through its transactional proxy:
 @Transactional
 public void applyAndAcknowledge(OrderEvent event, PgmqAcknowledgment acknowledgment) {
-    orderRepository.applyIdempotently(event); // e.g. enforce a unique business event ID
+    orderRepository.applyIdempotently(event);
     acknowledgment.acknowledge();
 }
 ```
 
-The example assumes application-defined `OrderEvent`, service and repository types. Ensure the
-service call crosses Spring's transaction proxy. `isCompleted()` reports a successfully returned
-completion SQL call, not a committed transaction. A later transaction rollback rolls back the
-archive as well. Discard the handle after that delivery.
+The DTO, service and repository are application types. The first successfully returned completion
+SQL wins on one handle. Concurrent attempts are serialized, and exceptions leave the handle
+incomplete. `isCompleted()` is not a transaction-commit signal. A later rollback restores database
+state; discard the handle after that delivery. A connection failure can leave the outcome unknown,
+so retries do not guarantee exactly-once side effects.
 
-The first successfully returned completion action wins. Concurrent calls on one handle are
-serialized. A thrown database exception leaves the handle incomplete and permits another attempt.
-Connection failures can leave the database outcome unknown, so this is not an exactly-once
-guarantee. Repeated delivery must remain safe for business code and external side effects.
+Default annotated listeners must be synchronous `void` singleton methods. Async return types,
+`@Async` and prototype listener beans are rejected at registration. Lazy singletons register when
+initialized. String `autoStartup` and `conditional` attributes use Spring resolution; numeric
+inheritance uses only `-1`. Explicit listener IDs keep monitoring identities stable.
 
-The default error handler logs processing failures and leaves messages for visibility-based
-redelivery. Maximum attempts, backoff and dead-letter routing are application policies in the
-current API; implement them through `PgmqErrorHandler` when required. Avoid swallowing a processing
-failure and returning normally in `AUTO` mode, since normal return triggers acknowledgement.
+## Shutdown and timeouts
 
-FIFO SQL read modes control selection; concurrent handlers can still finish in a different order.
-If business completion order matters, define the required per-group execution contract before
-increasing concurrency.
+The registry stops containers sequentially. Each container interrupts and waits for pollers, then
+drains consumers; each phase can wait up to `executor-shutdown-timeout-seconds`. Configure Spring's
+shutdown phase timeout and deployment grace period for the aggregate drain requirement.
 
-## Run the JDBC and Spring lifecycle checks
+Zero shutdown wait requests interruption without waiting. A driver or business task may ignore the
+interrupt. Late work retains its original run state and cannot release permits into a restarted run,
+but already executing business code can still finish or acknowledge.
 
-The JDBC lifecycle tests can run against an explicitly supplied disposable PostgreSQL database,
-without Testcontainers or pg_partman. They install PGMQ when needed and create temporary queues
-and a business table. Use a dedicated test database and an account allowed to install the bundled
-schema. For example, in Bash:
+Connection acquisition timeout, JDBC query timeout, lock waits, network timeout and SQL poll duration
+are different boundaries. The SQL polling deadline is checked between attempts and does not bound
+an individual statement's lock wait. Thread interruption does not guarantee query cancellation.
+Use the application's JDBC/data-source timeout settings and leave room above the intended healthy
+long-poll duration. The real JDBC tests verify configured query cancellation and reuse, including the
+case where immediate stop leaves SQL active until its deadline.
 
-```shell
-export PGMQ_TEST_JDBC_URL=jdbc:postgresql://127.0.0.1:5432/pgmq_test
-export PGMQ_TEST_USERNAME=postgres
-export PGMQ_TEST_PASSWORD=postgres
-mvn '-Dtest=PgmqJdbcLifecycleIntegrationTest' test
-```
+## Observe before changing capacity
 
-Without `PGMQ_TEST_JDBC_URL`, this test class is skipped. It checks zero-duration reads, empty-poll
-spacing, two listeners sharing two connections, acquisition timeout, slow-query cancellation,
-shutdown bounds, and Spring transactional rollback of business work together with manual ACK.
-It also exercises transaction-level queue locks, batch validation and shared headers, FIFO index
-creation and deprecated compatibility functions. The existing Testcontainers suite continues to
-cover pg_partman-dependent operations.
+Read queue age/depth, consumer latency, poll failures, in-flight state and data-source active/idle/
+pending counts together. In-flight gauges include reserved polling capacity, so an empty queue can
+show a nonzero value while a long poll is active. Listener gauges describe the current run; late tasks
+from a forced stop are not counted as new-run capacity.
 
-## Measure before tuning
+Database gauges are sampled after a meter registry binds. Listener counters/timers update per event.
+A failed dynamic registration can be retried with the same ID; gauges rebind to the new container
+while counters remain cumulative. Metric-registration failures do not break message processing.
 
-Watch listener processing latency, in-flight work, poll failures, queue age, visible queue depth,
-and connection-pool active, idle and pending counts together. A full in-flight limit can mean slow
-business work or connection contention. More consumer threads help only when the constrained
-resource has spare capacity. Increasing the JDBC pool also requires PostgreSQL capacity.
+See [verification](testing.md) for database setup and fault coverage, and [architecture](architecture.md)
+for validation ownership and execution boundaries.

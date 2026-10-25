@@ -2,6 +2,8 @@ package io.github.idoly.pgmq.listener.endpoint;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -88,6 +90,31 @@ class PgmqListenerEndpointRegistryTest {
 
         assertFalse(registry.isRunning());
         verify(second).stop();
+    }
+
+    @Test
+    void failedDynamicRegistrationCanRetryTheSameId() {
+        var registry = new PgmqListenerEndpointRegistry();
+        var failed = container(true);
+        var startError = new IllegalStateException("start failed");
+        var cleanupError = new IllegalStateException("cleanup failed");
+        doThrow(startError).when(failed).start();
+        doThrow(cleanupError).doNothing().when(failed).stop();
+        registry.start();
+        try {
+            var thrown = assertThrows(IllegalStateException.class,
+                    () -> registry.registerListenerContainer(new TestEndpoint("dynamic"), new TrackingFactory(failed)));
+            assertSame(startError, thrown);
+            assertSame(cleanupError, thrown.getSuppressed()[0]);
+            assertNull(registry.getListenerContainer("dynamic"));
+            var healthy = container(true);
+            registry.registerListenerContainer(new TestEndpoint("dynamic"), new TrackingFactory(healthy));
+            assertSame(healthy, registry.getListenerContainer("dynamic"));
+            verify(healthy).start();
+            verify(failed).stop();
+        } finally {
+            registry.stop();
+        }
     }
 
     private static PgmqListenerContainer container(boolean autoStartup) {

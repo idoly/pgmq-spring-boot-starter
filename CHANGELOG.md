@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- Widened read-only payload and header parameters to wildcard types so typed DTO lists and header
+  maps cannot fall through to varargs and be sent as unintended payloads.
+- Rejected asynchronous listener return types and method/class `@Async` in the default adapter
+  before execution, preserving synchronous acknowledgement semantics.
+- Registered lazy listener beans initialized after startup, and rolled back failed dynamic
+  registrations so the same listener ID can be retried with gauges bound to the replacement.
+- Treated unusable `_type` hints as generic JSON so typed argument conversion happens per message
+  and a conversion failure can reach the error handler without blocking healthy batch messages.
 - Isolated listener execution resources per start/stop cycle so late tasks cannot release
   capacity or dispatch messages into a restarted container.
 - Kept acknowledgement handles incomplete when completion SQL throws, allowing another attempt;
@@ -12,10 +20,28 @@
   configured interval between empty immediate listener reads.
 - Stopped registry-owned containers after startup failure and continued shutdown after individual
   container stop failures.
+- Rejected prototype listener beans and corrected large-capacity poll quota arithmetic without
+  adding arbitrary configuration limits.
+- Resolved annotation string settings with Spring and rejected invalid Boolean values and
+  negative numeric values other than the documented `-1` inheritance marker.
 
 ### Changed
 
 - Applied the listener enablement condition once to the listener configuration group.
+- Kept numeric runtime validation in resolved options; the factory only merges and normalizes values.
+  Shared-header sends and immediate-read delegation use their common validation paths.
+- Reused Spring's thread factory and Boolean editor, and Micrometer meter providers with shared
+  event tags. Allocation measurements and withdrawal experiments are recorded in the verification docs.
+
+### Build
+
+- Unified all integration suites on explicit JDBC settings and one PostgreSQL service per Boot
+  compatibility job. Removed the old Testcontainers base class, both Testcontainers dependencies,
+  their version property and the separate Podman job.
+- Added an optional JaCoCo profile with 90% line and 75% branch floors and uploaded CI reports.
+- Removed the configuration processor's duplicate ordinary dependency while retaining the processor
+  path and checking generated metadata. Source attachment uses the non-forking goal.
+- Added UTF-8/LF editor and Git policies, a manual allocation benchmark and regenerated documentation.
 
 ### Added
 

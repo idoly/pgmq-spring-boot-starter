@@ -3,10 +3,10 @@ package io.github.idoly.pgmq.listener.container;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
+
+import org.springframework.scheduling.concurrent.CustomizableThreadFactory;
 
 /**
  * Default platform-thread executor factory for listener containers.
@@ -26,7 +26,7 @@ public class DefaultPgmqListenerExecutorFactory implements PgmqListenerExecutorF
     public ExecutorService createPollExecutor(PgmqListenerContainerOptions options) {
         return Executors.newFixedThreadPool(
                 options.pollConcurrency(),
-                threadFactory("pgmq-poller-" + options.id() + "-"));
+                new CustomizableThreadFactory("pgmq-poller-" + options.id() + "-"));
     }
 
     /**
@@ -40,16 +40,8 @@ public class DefaultPgmqListenerExecutorFactory implements PgmqListenerExecutorF
                 0,
                 TimeUnit.MILLISECONDS,
                 new ArrayBlockingQueue<>(options.maxInFlight()),
-                threadFactory("pgmq-consumer-" + options.id() + "-"),
+                new CustomizableThreadFactory("pgmq-consumer-" + options.id() + "-"),
                 new ThreadPoolExecutor.AbortPolicy());
     }
 
-    private static ThreadFactory threadFactory(String prefix) {
-        AtomicInteger threadIndex = new AtomicInteger();
-        return task -> {
-            Thread thread = new Thread(task);
-            thread.setName(prefix + threadIndex.incrementAndGet());
-            return thread;
-        };
-    }
 }
